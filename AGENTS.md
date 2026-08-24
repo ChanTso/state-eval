@@ -34,7 +34,10 @@ authoritative database. The target output is one citable finding.
 3. Ablation switches are evaluation-profile-only. Never introduce a production flag that
    weakens authorization, scope enforcement, or validation on a path a real user can reach.
 4. The core package contains zero CityBuddy imports and zero CityBuddy SQL; everything
-   CityBuddy-specific lives behind an adapter. CI enforces this.
+   CityBuddy-specific lives behind an adapter. CI enforces this. The seam exists from the first
+   commit that has code on both sides of it: it is required, not a speculative abstraction, and
+   working agreement 2 is not a licence to skip it. With a single target the seam will be wrong
+   in its details. A second target is what corrects it, not more design up front.
 
 ## Evaluation semantics
 
