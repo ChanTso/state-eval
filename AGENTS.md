@@ -28,9 +28,11 @@ authoritative database. The target output is one citable finding.
    fixed. When a run genuinely needs a change there, it is a separate CityBuddy pull request
    under that repository's own rules, and the benchmark records which CityBuddy commit it ran
    against.
-2. Reach CityBuddy only through its evaluation surface: `/api/eval/reset`, `/api/eval/state`,
-   `/api/eval/audit/{sessionId}`, `/api/eval/version`, the sandbox lifecycle under
-   `/api/eval/sandboxes/{id}`, and `/auth/eval/test-token` for test identity.
+2. Drive CityBuddy only through its evaluation surface: `/api/eval/reset`, the sandbox lifecycle
+   under `/api/eval/sandboxes/{id}`, `/auth/eval/test-token` for test identity, and the agent's
+   own chat endpoint. Judge it through a different path. Acting and judging must never share a
+   route, so `/api/eval/state` and `/api/eval/audit/{sessionId}` are commerce describing itself
+   and are diagnostic only, never the oracle.
 3. Ablation switches are evaluation-profile-only. Never introduce a production flag that
    weakens authorization, scope enforcement, or validation on a path a real user can reach.
 4. The core package contains zero CityBuddy imports and zero CityBuddy SQL; everything

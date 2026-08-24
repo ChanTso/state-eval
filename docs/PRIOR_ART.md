@@ -36,14 +36,17 @@ its database as the oracle and its ground_truth ignored. Nothing here is verifie
 
 ## Enforcement ablation
 
-**Benchmarking Security Invariants in MCP-Style Agent Runtimes** — searched only
+**From Tool Connection to Execution Control: Benchmarking Security Invariants in MCP-Style Agent
+Runtimes** — searched only
 Counterfactual ablation that disables one enforcement component at a time and counts what each
 removal exposes: grant matching 6 of 10 cases, approval gate 2, handle-owner check 1.
 arXiv 2606.29073 · the closest published work to this project's v1 question.
 
-**AgentBound-Bench** — searched only
-Multi-stage ablation over four authorization configurations, from validation in isolation up to a
-full multi-authority pipeline.
+**AgentBound** — searched only
+The paper is "Behavioral Governance for Autonomous AI Agents: The AgentBound Framework"; the
+ablation described below belongs to its benchmark, AgentBound-Bench, and the two names should not
+be conflated. Multi-stage ablation over four authorization configurations, from validation in
+isolation up to a full multi-authority pipeline.
 arXiv 2606.30970
 
 **OverEager-Gen** — searched only
