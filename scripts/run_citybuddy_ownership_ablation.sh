@@ -1,27 +1,60 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-stateeval_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-citybuddy_root="${CITYBUDDY_REPO:-/Users/zhuochen/Dev/citybuddy}"
-expected_citybuddy_commit="d40d8bdba81d67f5bd4169626c001dc1bac2cb05"
-actual_citybuddy_commit="$(git -C "$citybuddy_root" rev-parse HEAD)"
+expected_proxy_attestation="CLIProxyAPI/7.2.76/9f62c8df28dc749ea976865450a458917bf45042/ad8d0e9d43888c794f32d9a36842c395f641038a1a622f650c7868dc6a359f0d"
 
 if [[ -z "${AGENT_MODEL_PROXY_URL:-}" ]]; then
   echo "AGENT_MODEL_PROXY_URL is required for both measured arms." >&2
+  exit 2
+fi
+if [[ -z "${AGENT_MODEL_PROXY_API_KEY:-}" ]]; then
+  echo "AGENT_MODEL_PROXY_API_KEY is required for both measured arms." >&2
   exit 2
 fi
 if [[ -z "${STATEEVAL_MODEL_NAME:-}" ]]; then
   echo "STATEEVAL_MODEL_NAME is required for both measured arms." >&2
   exit 2
 fi
+if [[ "$STATEEVAL_MODEL_NAME" != "gpt-5.4" ]]; then
+  echo "STATEEVAL_MODEL_NAME must be gpt-5.4 for this fixed evaluation." >&2
+  exit 2
+fi
 if [[ -z "${STATEEVAL_MODEL_TEMPERATURE:-}" ]]; then
   echo "STATEEVAL_MODEL_TEMPERATURE is required as fixed run metadata." >&2
   exit 2
 fi
+if [[ -z "${STATEEVAL_MODEL_TIMEOUT_SECONDS:-}" ]]; then
+  echo "STATEEVAL_MODEL_TIMEOUT_SECONDS is required for both measured arms." >&2
+  exit 2
+fi
+if [[ "${STATEEVAL_PROXY_ATTESTATION:-}" != "$expected_proxy_attestation" ]]; then
+  echo "STATEEVAL_PROXY_ATTESTATION must identify the inspected proxy deployment." >&2
+  exit 2
+fi
 
 stateeval_real_model_proxy_url="${AGENT_MODEL_PROXY_URL%/}"
+stateeval_real_model_proxy_api_key="$AGENT_MODEL_PROXY_API_KEY"
 stateeval_model_name="$STATEEVAL_MODEL_NAME"
 stateeval_model_temperature="$STATEEVAL_MODEL_TEMPERATURE"
+stateeval_model_timeout_seconds="$STATEEVAL_MODEL_TIMEOUT_SECONDS"
+export -n \
+  expected_proxy_attestation \
+  stateeval_real_model_proxy_url \
+  stateeval_real_model_proxy_api_key \
+  stateeval_model_name \
+  stateeval_model_temperature \
+  stateeval_model_timeout_seconds
+
+# Provider configuration is passed only to the two measured agent processes below.
+unset AGENT_MODEL_PROXY_URL AGENT_MODEL_PROXY_API_KEY
+unset AGENT_MODEL_TEMPERATURE AGENT_MODEL_TIMEOUT_SECONDS
+unset CLIPROXY_BASE_URL CLIPROXY_API_KEY
+unset STATEEVAL_PROXY_ATTESTATION
+
+stateeval_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+citybuddy_root="${CITYBUDDY_REPO:-/Users/zhuochen/Dev/citybuddy}"
+expected_citybuddy_commit="1238be92c193d37582dd987e2032cffaf90f2c57"
+actual_citybuddy_commit="$(git -C "$citybuddy_root" rev-parse HEAD)"
 
 if [[ "$actual_citybuddy_commit" != "$expected_citybuddy_commit" ]]; then
   echo "CityBuddy must be at $expected_citybuddy_commit; found $actual_citybuddy_commit." >&2
@@ -261,9 +294,17 @@ start_agent() {
   local label="$1"
   local model_proxy_url="$2"
   local model_name="$3"
-  local commerce_port="$4"
-  local pid_variable="$5"
-  local port_variable="$6"
+  local model_proxy_api_key="$4"
+  local model_temperature="$5"
+  local model_timeout_seconds="$6"
+  local commerce_port="$7"
+  local pid_variable="$8"
+  local port_variable="$9"
+  export -n \
+    model_proxy_url \
+    model_proxy_api_key \
+    model_temperature \
+    model_timeout_seconds
   local log="$stateeval_runtime_dir/agent-$label.log"
   local log_offset
   port_log_offset log_offset "$log"
@@ -288,6 +329,9 @@ start_agent() {
     AGENT_EXCHANGE_SCOPES='catalog:read refund:create' \
     AGENT_ATTEMPT_BUDGET=16 \
     AGENT_MODEL_PROXY_URL="$model_proxy_url" \
+    AGENT_MODEL_PROXY_API_KEY="$model_proxy_api_key" \
+    AGENT_MODEL_TEMPERATURE="$model_temperature" \
+    AGENT_MODEL_TIMEOUT_SECONDS="$model_timeout_seconds" \
     AGENT_PRIMARY_ROLE_ALIAS="$model_name" \
     AGENT_FALLBACK_ROLE_ALIAS="$model_name" \
     AGENT_COMMERCE_TOOLS_URL="http://127.0.0.1:$commerce_port" \
@@ -411,6 +455,9 @@ start_agent \
   control \
   "http://127.0.0.1:$stateeval_fixture_model_port" \
   support-standard-primary \
+  "" \
+  "" \
+  2 \
   "$stateeval_commerce_off_port" \
   stateeval_control_agent_pid \
   stateeval_control_agent_port
@@ -418,6 +465,9 @@ start_agent \
   on \
   "$stateeval_real_model_proxy_url" \
   "$stateeval_model_name" \
+  "$stateeval_real_model_proxy_api_key" \
+  "$stateeval_model_temperature" \
+  "$stateeval_model_timeout_seconds" \
   "$stateeval_commerce_on_port" \
   stateeval_agent_on_pid \
   stateeval_agent_on_port
@@ -425,13 +475,17 @@ start_agent \
   off \
   "$stateeval_real_model_proxy_url" \
   "$stateeval_model_name" \
+  "$stateeval_real_model_proxy_api_key" \
+  "$stateeval_model_temperature" \
+  "$stateeval_model_timeout_seconds" \
   "$stateeval_commerce_off_port" \
   stateeval_agent_off_pid \
   stateeval_agent_off_port
 
-# The proxy location is runtime configuration for the agents, not evaluation evidence.
-unset AGENT_MODEL_PROXY_URL
+# Provider location and credentials are runtime configuration, not evaluation evidence.
 stateeval_real_model_proxy_url=""
+stateeval_real_model_proxy_api_key=""
+unset stateeval_real_model_proxy_url stateeval_real_model_proxy_api_key
 
 stateeval_output_dir="${STATEEVAL_RESULTS_DIR:-$stateeval_root/results/milestone-2}"
 assert_ownership_off_alive
@@ -453,6 +507,7 @@ STATEEVAL_MOCK_PAYMENT_SECRET="$stateeval_mock_payment_secret" \
 STATEEVAL_CITYBUDDY_COMMIT="$actual_citybuddy_commit" \
 STATEEVAL_MODEL_NAME="$stateeval_model_name" \
 STATEEVAL_MODEL_TEMPERATURE="$stateeval_model_temperature" \
+STATEEVAL_MODEL_TIMEOUT_SECONDS="$stateeval_model_timeout_seconds" \
 STATEEVAL_OWNERSHIP_OFF_LAUNCH_ID="$stateeval_ownership_off_launch_id" \
 STATEEVAL_OWNERSHIP_OFF_PID="$stateeval_commerce_off_pid" \
 python3 -m stateeval.citybuddy --output "$stateeval_output_dir" || stateeval_run_status=$?
