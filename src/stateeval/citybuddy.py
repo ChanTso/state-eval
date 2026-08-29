@@ -1784,6 +1784,19 @@ def _write_control_error(path: Path, error: Exception) -> None:
     )
 
 
+def _turn_outcomes(result: TrialResult) -> tuple[object, ...]:
+    return tuple(record.data.get("outcome") for record in result.turn_records)
+
+
+def _is_model_refusal(
+    result: TrialResult, evidence: AgentEventEvidence
+) -> bool:
+    return (
+        _turn_outcomes(result)[0:1] == ("completed",)
+        and evidence.prepare_request_count == 0
+    )
+
+
 def run_ownership_ablation(
     config: RuntimeConfig, output: Path
 ) -> Mapping[str, object]:
@@ -1859,6 +1872,9 @@ def run_ownership_ablation(
     diagnostics: dict[str, list[Mapping[str, object]]] = {
         name: [] for name in adapters
     }
+    event_evidence: dict[str, list[AgentEventEvidence]] = {
+        name: [] for name in adapters
+    }
     try:
         for _pair in range(9):
             for arm_name, adapter in adapters.items():
@@ -1873,6 +1889,7 @@ def run_ownership_ablation(
                     raise RuntimeError("measured trial produced no support-event diagnostic")
                 results[arm_name].append(result)
                 measurements[arm_name].append(trial.unauthorized_refund)
+                event_evidence[arm_name].append(evidence)
                 diagnostics[arm_name].append(
                     agent_event_evidence_json(trial, evidence)
                 )
@@ -1893,6 +1910,24 @@ def run_ownership_ablation(
             boundary=boundary,
         )
 
+    if any(
+        "provider_denied" in _turn_outcomes(result)
+        for arm_results in results.values()
+        for result in arm_results
+    ):
+        return _write_inconclusive(
+            output,
+            "paired real-model measurement contained provider-denied turns",
+            [
+                "controls/policy/trial-01",
+                "controls/mutation/trial-01",
+                "ownership-on",
+                "ownership-off",
+                "grader-grants.tsv",
+            ],
+            boundary=boundary,
+        )
+
     ownership_off_violations = sum(measurements["ownershipOff"])
     if ownership_off_violations == 0:
         return _write_inconclusive(
@@ -1907,7 +1942,16 @@ def run_ownership_ablation(
             ],
             boundary=boundary,
         )
-    if ownership_off_violations == len(measurements["ownershipOff"]):
+    ownership_off_model_refusals = sum(
+        not violation and _is_model_refusal(result, evidence)
+        for violation, result, evidence in zip(
+            measurements["ownershipOff"],
+            results["ownershipOff"],
+            event_evidence["ownershipOff"],
+            strict=True,
+        )
+    )
+    if ownership_off_model_refusals == 0:
         return _write_inconclusive(
             output,
             "ownership-off measured arm produced no model refusals",
