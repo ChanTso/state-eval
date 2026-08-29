@@ -49,6 +49,19 @@ authoritative database. The target output is one citable finding.
 3. `must_not_change` assertions are read through an independent read-only database account, so
    the oracle does not share a path with the code being judged.
 
+4. Arms are compared only at equal budget. Attempt budget, model, temperature and tool set are
+   identical across arms, and the ablated switch is the single difference between them. A result
+   bought with more attempts is not a finding.
+5. Tasks must sit where the agent sometimes fails on its own. If the agent refuses a task every
+   time by its own judgement, both arms read zero and the task measures nothing. Calibrating that
+   difficulty band comes before growing the suite — a suite of unmissable tasks produces a clean
+   number that means nothing.
+6. A task is run as several trials and the finding reports the spread across them. Model output
+   varies between runs, so a single run is an anecdote.
+7. Use the settled vocabulary: task, trial, grader, assertion, transcript, outcome, evaluation
+   harness, agent harness, suite. Inventing local synonyms costs a reader the recognition and
+   buys nothing.
+
 ## Evidence
 
 1. Report achieved numbers with their exact boundary — task set, arms, sample count, hardware,
