@@ -3,8 +3,25 @@ set -euo pipefail
 
 stateeval_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 citybuddy_root="${CITYBUDDY_REPO:-/Users/zhuochen/Dev/citybuddy}"
-expected_citybuddy_commit="af81ec225a99ed3bc541df6fab6b27d18bf15469"
+expected_citybuddy_commit="d40d8bdba81d67f5bd4169626c001dc1bac2cb05"
 actual_citybuddy_commit="$(git -C "$citybuddy_root" rev-parse HEAD)"
+
+if [[ -z "${AGENT_MODEL_PROXY_URL:-}" ]]; then
+  echo "AGENT_MODEL_PROXY_URL is required for both measured arms." >&2
+  exit 2
+fi
+if [[ -z "${STATEEVAL_MODEL_NAME:-}" ]]; then
+  echo "STATEEVAL_MODEL_NAME is required for both measured arms." >&2
+  exit 2
+fi
+if [[ -z "${STATEEVAL_MODEL_TEMPERATURE:-}" ]]; then
+  echo "STATEEVAL_MODEL_TEMPERATURE is required as fixed run metadata." >&2
+  exit 2
+fi
+
+stateeval_real_model_proxy_url="${AGENT_MODEL_PROXY_URL%/}"
+stateeval_model_name="$STATEEVAL_MODEL_NAME"
+stateeval_model_temperature="$STATEEVAL_MODEL_TEMPERATURE"
 
 if [[ "$actual_citybuddy_commit" != "$expected_citybuddy_commit" ]]; then
   echo "CityBuddy must be at $expected_citybuddy_commit; found $actual_citybuddy_commit." >&2
@@ -19,16 +36,23 @@ source "$citybuddy_root/scripts/test_dynamic_ports.sh"
 
 stateeval_runtime_dir="$(mktemp -d)"
 stateeval_env_file="$stateeval_runtime_dir/.env"
-stateeval_project="stateeval-m1-$$"
+stateeval_project="stateeval-m2-$$"
 stateeval_auth_pid=""
-stateeval_commerce_pid=""
-stateeval_model_pid=""
-stateeval_agent_pid=""
+stateeval_commerce_on_pid=""
+stateeval_commerce_off_pid=""
+stateeval_fixture_model_pid=""
+stateeval_control_agent_pid=""
+stateeval_agent_on_pid=""
+stateeval_agent_off_pid=""
 stateeval_mysql_port=""
 stateeval_auth_port=""
-stateeval_commerce_port=""
-stateeval_model_port=""
-stateeval_agent_port=""
+stateeval_commerce_on_port=""
+stateeval_commerce_off_port=""
+stateeval_fixture_model_port=""
+stateeval_control_agent_port=""
+stateeval_agent_on_port=""
+stateeval_agent_off_port=""
+stateeval_ownership_off_launch_id="stateeval-ownership-off-$(openssl rand -hex 12)"
 compose=(
   docker compose
   --project-name "$stateeval_project"
@@ -40,18 +64,24 @@ cleanup() {
   local status=$?
   local resource_status=0
   for pid in \
-    "$stateeval_agent_pid" \
-    "$stateeval_model_pid" \
-    "$stateeval_commerce_pid" \
+    "$stateeval_agent_off_pid" \
+    "$stateeval_agent_on_pid" \
+    "$stateeval_control_agent_pid" \
+    "$stateeval_fixture_model_pid" \
+    "$stateeval_commerce_off_pid" \
+    "$stateeval_commerce_on_pid" \
     "$stateeval_auth_pid"; do
     if [[ -n "$pid" ]]; then
       kill "$pid" >/dev/null 2>&1 || true
     fi
   done
   for pid in \
-    "$stateeval_agent_pid" \
-    "$stateeval_model_pid" \
-    "$stateeval_commerce_pid" \
+    "$stateeval_agent_off_pid" \
+    "$stateeval_agent_on_pid" \
+    "$stateeval_control_agent_pid" \
+    "$stateeval_fixture_model_pid" \
+    "$stateeval_commerce_off_pid" \
+    "$stateeval_commerce_on_pid" \
     "$stateeval_auth_pid"; do
     if [[ -n "$pid" ]]; then
       wait "$pid" >/dev/null 2>&1 || true
@@ -137,8 +167,20 @@ start_auth() {
 }
 
 start_commerce() {
+  local label="$1"
+  local ownership_binding="$2"
+  local pid_variable="$3"
+  local port_variable="$4"
+  local log="$stateeval_runtime_dir/commerce-$label.log"
   local log_offset
-  port_log_offset log_offset "$stateeval_runtime_dir/commerce.log"
+  case "$ownership_binding" in
+    true | false) ;;
+    *)
+      echo "Invalid ownership-binding value: $ownership_binding" >&2
+      return 2
+      ;;
+  esac
+  port_log_offset log_offset "$log"
   SPRING_DATASOURCE_PASSWORD="$stateeval_commerce_app_password" \
     java -jar "$citybuddy_root/commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar" \
     --server.port=0 \
@@ -166,8 +208,9 @@ start_commerce() {
     --citybuddy.evaluation.janitor-interval=5s \
     --citybuddy.evaluation.max-cleanup-attempts=5 \
     --citybuddy.evaluation.janitor-batch-size=4 \
-    --citybuddy.evaluation.build-id=stateeval-m1 \
+    --citybuddy.evaluation.build-id=stateeval-m2 \
     --citybuddy.evaluation.schema-compatibility=commerce-evaluation-v1 \
+    --citybuddy.evaluation.action-ownership-binding-enabled="$ownership_binding" \
     --citybuddy.mock-payment.enabled=true \
     --citybuddy.mock-payment.required-permission=support:chat \
     --citybuddy.mock-payment.callback-key-id="$stateeval_mock_payment_key" \
@@ -185,37 +228,45 @@ start_commerce() {
     --citybuddy.actions.lock-wait-timeout-seconds=1 \
     --citybuddy.actions.maximum-observation-attempts=2 \
     --citybuddy.actions.observation-backoff=25ms \
-    >>"$stateeval_runtime_dir/commerce.log" 2>&1 &
-  stateeval_commerce_pid=$!
+    >>"$log" 2>&1 &
+  local pid=$!
+  printf -v "$pid_variable" '%s' "$pid"
   process_bound_port \
-    stateeval_commerce_port spring "$stateeval_commerce_pid" \
-    "$stateeval_runtime_dir/commerce.log" "$log_offset"
+    "$port_variable" spring "$pid" "$log" "$log_offset"
+  local port="${!port_variable}"
   wait_http \
-    "http://127.0.0.1:$stateeval_commerce_port/api/products" \
-    "$stateeval_commerce_pid" \
-    "$stateeval_runtime_dir/commerce.log"
+    "http://127.0.0.1:$port/api/products" \
+    "$pid" \
+    "$log"
 }
 
 start_model_fixture() {
   local log_offset
-  port_log_offset log_offset "$stateeval_runtime_dir/model.log"
+  port_log_offset log_offset "$stateeval_runtime_dir/control-model.log"
   (
     cd "$citybuddy_root"
     uv run python scripts/fake_litellm_server.py --port 0
-  ) >>"$stateeval_runtime_dir/model.log" 2>&1 &
-  stateeval_model_pid=$!
+  ) >>"$stateeval_runtime_dir/control-model.log" 2>&1 &
+  stateeval_fixture_model_pid=$!
   process_bound_port \
-    stateeval_model_port uvicorn "$stateeval_model_pid" "$stateeval_runtime_dir/model.log" \
-    "$log_offset"
+    stateeval_fixture_model_port uvicorn "$stateeval_fixture_model_pid" \
+    "$stateeval_runtime_dir/control-model.log" "$log_offset"
   wait_http \
-    "http://127.0.0.1:$stateeval_model_port/fixture/counts" \
-    "$stateeval_model_pid" \
-    "$stateeval_runtime_dir/model.log"
+    "http://127.0.0.1:$stateeval_fixture_model_port/fixture/counts" \
+    "$stateeval_fixture_model_pid" \
+    "$stateeval_runtime_dir/control-model.log"
 }
 
 start_agent() {
+  local label="$1"
+  local model_proxy_url="$2"
+  local model_name="$3"
+  local commerce_port="$4"
+  local pid_variable="$5"
+  local port_variable="$6"
+  local log="$stateeval_runtime_dir/agent-$label.log"
   local log_offset
-  port_log_offset log_offset "$stateeval_runtime_dir/agent.log"
+  port_log_offset log_offset "$log"
   (
     cd "$citybuddy_root"
     AGENT_PORT=0 \
@@ -236,19 +287,31 @@ start_agent() {
     AGENT_SERVICE_CLIENT_SECRET="$stateeval_agent_service_password" \
     AGENT_EXCHANGE_SCOPES='catalog:read refund:create' \
     AGENT_ATTEMPT_BUDGET=16 \
-    AGENT_MODEL_PROXY_URL="http://127.0.0.1:$stateeval_model_port" \
-    AGENT_COMMERCE_TOOLS_URL="http://127.0.0.1:$stateeval_commerce_port" \
-    AGENT_COMMERCE_LIVENESS_URL="http://127.0.0.1:$stateeval_commerce_port" \
+    AGENT_MODEL_PROXY_URL="$model_proxy_url" \
+    AGENT_PRIMARY_ROLE_ALIAS="$model_name" \
+    AGENT_FALLBACK_ROLE_ALIAS="$model_name" \
+    AGENT_COMMERCE_TOOLS_URL="http://127.0.0.1:$commerce_port" \
+    AGENT_COMMERCE_LIVENESS_URL="http://127.0.0.1:$commerce_port" \
     uv run citybuddy-agent
-  ) >>"$stateeval_runtime_dir/agent.log" 2>&1 &
-  stateeval_agent_pid=$!
+  ) >>"$log" 2>&1 &
+  local pid=$!
+  printf -v "$pid_variable" '%s' "$pid"
   process_bound_port \
-    stateeval_agent_port uvicorn "$stateeval_agent_pid" "$stateeval_runtime_dir/agent.log" \
-    "$log_offset"
+    "$port_variable" uvicorn "$pid" "$log" "$log_offset"
+  local port="${!port_variable}"
   wait_http \
-    "http://127.0.0.1:$stateeval_agent_port/api/sessions" \
-    "$stateeval_agent_pid" \
-    "$stateeval_runtime_dir/agent.log"
+    "http://127.0.0.1:$port/api/sessions" \
+    "$pid" \
+    "$log"
+}
+
+assert_ownership_off_alive() {
+  if kill -0 "$stateeval_commerce_off_pid" >/dev/null 2>&1; then
+    return 0
+  fi
+  tail -n 120 "$stateeval_runtime_dir/commerce-off.log" >&2 || true
+  echo "Ownership-binding-off commerce process did not remain continuous." >&2
+  return 1
 }
 
 (
@@ -341,16 +404,45 @@ GRANT SELECT ON cs_db.support_event TO 'stateeval_grader'@'%';
 "
 
 start_auth
-start_commerce
+start_commerce on true stateeval_commerce_on_pid stateeval_commerce_on_port
+start_commerce off false stateeval_commerce_off_pid stateeval_commerce_off_port
 start_model_fixture
-start_agent
+start_agent \
+  control \
+  "http://127.0.0.1:$stateeval_fixture_model_port" \
+  support-standard-primary \
+  "$stateeval_commerce_off_port" \
+  stateeval_control_agent_pid \
+  stateeval_control_agent_port
+start_agent \
+  on \
+  "$stateeval_real_model_proxy_url" \
+  "$stateeval_model_name" \
+  "$stateeval_commerce_on_port" \
+  stateeval_agent_on_pid \
+  stateeval_agent_on_port
+start_agent \
+  off \
+  "$stateeval_real_model_proxy_url" \
+  "$stateeval_model_name" \
+  "$stateeval_commerce_off_port" \
+  stateeval_agent_off_pid \
+  stateeval_agent_off_port
 
-stateeval_output_dir="${STATEEVAL_RESULTS_DIR:-$stateeval_root/results/milestone-1}"
+# The proxy location is runtime configuration for the agents, not evaluation evidence.
+unset AGENT_MODEL_PROXY_URL
+stateeval_real_model_proxy_url=""
+
+stateeval_output_dir="${STATEEVAL_RESULTS_DIR:-$stateeval_root/results/milestone-2}"
+assert_ownership_off_alive
+stateeval_run_status=0
 PYTHONPATH="$stateeval_root/src" \
 STATEEVAL_AUTH_BASE_URL="http://127.0.0.1:$stateeval_auth_port" \
-STATEEVAL_COMMERCE_BASE_URL="http://127.0.0.1:$stateeval_commerce_port" \
-STATEEVAL_AGENT_BASE_URL="http://127.0.0.1:$stateeval_agent_port" \
-STATEEVAL_MODEL_BASE_URL="http://127.0.0.1:$stateeval_model_port" \
+STATEEVAL_COMMERCE_ON_BASE_URL="http://127.0.0.1:$stateeval_commerce_on_port" \
+STATEEVAL_COMMERCE_OFF_BASE_URL="http://127.0.0.1:$stateeval_commerce_off_port" \
+STATEEVAL_AGENT_ON_BASE_URL="http://127.0.0.1:$stateeval_agent_on_port" \
+STATEEVAL_AGENT_OFF_BASE_URL="http://127.0.0.1:$stateeval_agent_off_port" \
+STATEEVAL_CONTROL_AGENT_BASE_URL="http://127.0.0.1:$stateeval_control_agent_port" \
 STATEEVAL_MANAGEMENT_PASSWORD="$stateeval_management_password" \
 STATEEVAL_EVALUATION_CLIENT_PASSWORD="$stateeval_evaluation_client_password" \
 STATEEVAL_MYSQL_CONTAINER="$stateeval_mysql_container" \
@@ -359,4 +451,10 @@ STATEEVAL_MYSQL_PASSWORD="$stateeval_grader_password" \
 STATEEVAL_MOCK_PAYMENT_KEY="$stateeval_mock_payment_key" \
 STATEEVAL_MOCK_PAYMENT_SECRET="$stateeval_mock_payment_secret" \
 STATEEVAL_CITYBUDDY_COMMIT="$actual_citybuddy_commit" \
-python3 -m stateeval.citybuddy --output "$stateeval_output_dir"
+STATEEVAL_MODEL_NAME="$stateeval_model_name" \
+STATEEVAL_MODEL_TEMPERATURE="$stateeval_model_temperature" \
+STATEEVAL_OWNERSHIP_OFF_LAUNCH_ID="$stateeval_ownership_off_launch_id" \
+STATEEVAL_OWNERSHIP_OFF_PID="$stateeval_commerce_off_pid" \
+python3 -m stateeval.citybuddy --output "$stateeval_output_dir" || stateeval_run_status=$?
+assert_ownership_off_alive
+exit "$stateeval_run_status"

@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: test check-core-boundary check baseline
+.PHONY: test check-core-boundary check ownership-ablation
 
 test:
 	PYTHONPATH=src $(PYTHON) -m unittest discover -s tests -v
@@ -21,8 +21,8 @@ check-core-boundary:
 
 check: check-core-boundary test
 	$(PYTHON) -m compileall -q src tests
-	bash -n scripts/run_citybuddy_baseline.sh
+	bash -n scripts/run_citybuddy_ownership_ablation.sh
 	git diff --check
 
-baseline:
-	./scripts/run_citybuddy_baseline.sh
+ownership-ablation:
+	./scripts/run_citybuddy_ownership_ablation.sh
