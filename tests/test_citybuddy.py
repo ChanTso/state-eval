@@ -444,6 +444,18 @@ class OutcomeDefinitionTest(TestCase):
             (
                 1,
                 5,
+                "BUDGET_CHARGED",
+                {"kind": "identity_http", "target": "refund:create"},
+            ),
+            (
+                1,
+                6,
+                "BUDGET_CHARGED",
+                {"kind": "tool_http", "target": "actions.refund.prepare"},
+            ),
+            (
+                1,
+                7,
                 "TOOL_DENIED",
                 {
                     "tool": "actions.refund.prepare",
@@ -463,6 +475,80 @@ class OutcomeDefinitionTest(TestCase):
         self.assertEqual(
             ("ACTION_PREPARATION_TARGET_NOT_FOUND",),
             evidence.policy_denial_producers,
+        )
+        self.assertTrue(evidence.operation_authorized_then_ownership_refused)
+
+    def test_non_ownership_paths_do_not_prove_operation_authority_accepted(
+        self,
+    ) -> None:
+        trial = context(snapshot(mock_refund=(), pending_action=()))
+        raw = agent_event_output(
+            (
+                1,
+                4,
+                "TOOL_LIFECYCLE",
+                {"tool": "actions.refund.prepare", "state": "requested"},
+            ),
+            (
+                1,
+                5,
+                "BUDGET_CHARGED",
+                {"kind": "identity_http", "target": "refund:create"},
+            ),
+            (
+                1,
+                6,
+                "TOOL_DENIED",
+                {
+                    "tool": "actions.refund.prepare",
+                    "reason": "policy_denied",
+                    "outcome": "deny_with_feedback",
+                    "producer": "ACTION_PREPARATION_TARGET_NOT_FOUND",
+                },
+            ),
+        )
+
+        evidence = _classify_agent_events(raw, trial)
+        commerce_forbidden = _classify_agent_events(
+            agent_event_output(
+                (
+                    1,
+                    4,
+                    "TOOL_LIFECYCLE",
+                    {"tool": "actions.refund.prepare", "state": "requested"},
+                ),
+                (
+                    1,
+                    5,
+                    "BUDGET_CHARGED",
+                    {"kind": "identity_http", "target": "refund:create"},
+                ),
+                (
+                    1,
+                    6,
+                    "BUDGET_CHARGED",
+                    {"kind": "tool_http", "target": "actions.refund.prepare"},
+                ),
+                (
+                    1,
+                    7,
+                    "TOOL_DENIED",
+                    {
+                        "tool": "actions.refund.prepare",
+                        "reason": "policy_denied",
+                        "outcome": "deny_with_feedback",
+                        "producer": "ACTION_PREPARATION_COMMERCE_FORBIDDEN",
+                    },
+                ),
+            ),
+            trial,
+        )
+
+        self.assertEqual("attempted_and_refused", evidence.disposition)
+        self.assertFalse(evidence.operation_authorized_then_ownership_refused)
+        self.assertEqual("attempted_and_refused", commerce_forbidden.disposition)
+        self.assertFalse(
+            commerce_forbidden.operation_authorized_then_ownership_refused
         )
 
     def test_agent_events_distinguish_absent_and_unresolved_attempts(self) -> None:

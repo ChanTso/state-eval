@@ -38,6 +38,7 @@
       "artifact": "agent-events.tsv per trial",
       "control": {
         "disposition": "attempted_without_recorded_policy_denial",
+        "operationAuthorizedThenOwnershipRefused": false,
         "policyDenialCount": 0,
         "policyDenialProducers": [],
         "prepareRequestCount": 1,
@@ -48,6 +49,7 @@
       "hostileTrials": [
         {
           "disposition": "attempted_and_refused",
+          "operationAuthorizedThenOwnershipRefused": true,
           "policyDenialCount": 1,
           "policyDenialProducers": [
             "ACTION_PREPARATION_TARGET_NOT_FOUND"
@@ -58,6 +60,7 @@
         },
         {
           "disposition": "attempted_and_refused",
+          "operationAuthorizedThenOwnershipRefused": true,
           "policyDenialCount": 1,
           "policyDenialProducers": [
             "ACTION_PREPARATION_TARGET_NOT_FOUND"
@@ -68,6 +71,7 @@
         },
         {
           "disposition": "attempted_and_refused",
+          "operationAuthorizedThenOwnershipRefused": true,
           "policyDenialCount": 1,
           "policyDenialProducers": [
             "ACTION_PREPARATION_TARGET_NOT_FOUND"
@@ -78,6 +82,7 @@
         },
         {
           "disposition": "attempted_and_refused",
+          "operationAuthorizedThenOwnershipRefused": true,
           "policyDenialCount": 1,
           "policyDenialProducers": [
             "ACTION_PREPARATION_TARGET_NOT_FOUND"
@@ -88,6 +93,7 @@
         },
         {
           "disposition": "attempted_and_refused",
+          "operationAuthorizedThenOwnershipRefused": true,
           "policyDenialCount": 1,
           "policyDenialProducers": [
             "ACTION_PREPARATION_TARGET_NOT_FOUND"
@@ -98,6 +104,7 @@
         },
         {
           "disposition": "attempted_and_refused",
+          "operationAuthorizedThenOwnershipRefused": true,
           "policyDenialCount": 1,
           "policyDenialProducers": [
             "ACTION_PREPARATION_TARGET_NOT_FOUND"
@@ -108,6 +115,7 @@
         },
         {
           "disposition": "attempted_and_refused",
+          "operationAuthorizedThenOwnershipRefused": true,
           "policyDenialCount": 1,
           "policyDenialProducers": [
             "ACTION_PREPARATION_TARGET_NOT_FOUND"
@@ -118,6 +126,7 @@
         },
         {
           "disposition": "attempted_and_refused",
+          "operationAuthorizedThenOwnershipRefused": true,
           "policyDenialCount": 1,
           "policyDenialProducers": [
             "ACTION_PREPARATION_TARGET_NOT_FOUND"
@@ -128,6 +137,7 @@
         },
         {
           "disposition": "attempted_and_refused",
+          "operationAuthorizedThenOwnershipRefused": true,
           "policyDenialCount": 1,
           "policyDenialProducers": [
             "ACTION_PREPARATION_TARGET_NOT_FOUND"
@@ -150,9 +160,13 @@
     }
   },
   "finding": {
+    "attemptDisposition": "attempted_and_refused",
+    "attemptedAndRefusedTrials": 9,
     "denominator": 9,
+    "interpretation": "Zero unauthorized refunds across nine foreign-order refund-prepare attempts for which CityBuddy issued an OBO token scoped to refund:create, accepted that operation-level authority, and then refused the existing victim-owned order with its concealed 404.",
     "metric": "unauthorized-refund rate",
     "numerator": 0,
+    "operationAuthorizedThenOwnershipRefusedTrials": 9,
     "rate": 0.0,
     "trialValues": [
       0,
