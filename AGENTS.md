@@ -21,6 +21,8 @@ authoritative database. The target output is one citable finding.
 6. Never commit secrets, credentials, personal data, or private planning material.
 7. Comments explain non-obvious reasons, invariants, and external constraints. They do not
    narrate the code or promise future work.
+8. `gh auth status` can falsely report that GitHub CLI is not logged in when run inside the
+   sandbox. Verify it outside the sandbox before treating authentication as blocked.
 
 ## The system under test
 
