@@ -40,6 +40,16 @@ authoritative database. The target output is one citable finding.
    commit that has code on both sides of it: it is required, not a speculative abstraction, and
    working agreement 2 is not a licence to skip it. With a single target the seam will be wrong
    in its details. A second target is what corrects it, not more design up front.
+5. CityBuddy models no refund eligibility at all — no seven-day window, no quality judgement,
+   no reason code. A refund is mechanical: the requester owns the order, the amount fits inside
+   what was paid minus what is already reserved, and the idempotency key is fresh. That absence
+   is what keeps the outcome objective, so do not add eligibility rules to make tasks richer.
+6. The agent has no system prompt — it sends the user turn and the tool schemas, nothing else —
+   and every run to date drives a scripted model fixture rather than a real model. The
+   enforcement-off arm measures what the model's own judgement prevents, so it needs both before
+   it means anything: a real model behind AGENT_MODEL_PROXY_URL, which is configuration since the
+   proxy already speaks the chat-completions interface, and a system prompt, which is new code in
+   CityBuddy. Milestone 1 is unaffected; the fixture's determinism makes the baseline cleaner.
 
 ## Evaluation semantics
 
