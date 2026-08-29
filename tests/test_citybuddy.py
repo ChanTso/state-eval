@@ -560,7 +560,7 @@ class OutcomeDefinitionTest(TestCase):
 
         self.assertIn(
             'expected_citybuddy_commit="'
-            '1238be92c193d37582dd987e2032cffaf90f2c57"',
+            'df4e87e7c4cf43af88dfb50399bd1cfd1f7f53b4"',
             script,
         )
         capture = script.index(

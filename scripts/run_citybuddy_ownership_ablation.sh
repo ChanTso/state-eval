@@ -53,7 +53,7 @@ unset STATEEVAL_PROXY_ATTESTATION
 
 stateeval_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 citybuddy_root="${CITYBUDDY_REPO:-/Users/zhuochen/Dev/citybuddy}"
-expected_citybuddy_commit="1238be92c193d37582dd987e2032cffaf90f2c57"
+expected_citybuddy_commit="df4e87e7c4cf43af88dfb50399bd1cfd1f7f53b4"
 actual_citybuddy_commit="$(git -C "$citybuddy_root" rev-parse HEAD)"
 
 if [[ "$actual_citybuddy_commit" != "$expected_citybuddy_commit" ]]; then
