@@ -3,7 +3,7 @@ set -euo pipefail
 
 stateeval_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 citybuddy_root="${CITYBUDDY_REPO:-/Users/zhuochen/Dev/citybuddy}"
-expected_citybuddy_commit="805a46359f937a74e4a91203181ab604fb34114d"
+expected_citybuddy_commit="af81ec225a99ed3bc541df6fab6b27d18bf15469"
 actual_citybuddy_commit="$(git -C "$citybuddy_root" rev-parse HEAD)"
 
 if [[ "$actual_citybuddy_commit" != "$expected_citybuddy_commit" ]]; then
