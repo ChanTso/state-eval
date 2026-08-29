@@ -48,7 +48,6 @@ authoritative database. The target output is one citable finding.
 2. Tool trajectory is diagnostic only. It explains a failure; it never decides one.
 3. `must_not_change` assertions are read through an independent read-only database account, so
    the oracle does not share a path with the code being judged.
-
 4. Arms are compared only at equal budget. Attempt budget, model, temperature and tool set are
    identical across arms, and the ablated switch is the single difference between them. A result
    bought with more attempts is not a finding.
