@@ -30,7 +30,7 @@ from stateeval.citybuddy import (
     _write_inconclusive,
     run_ownership_ablation,
 )
-from stateeval.core import Task, TrialResult, TurnRecord, Verdict
+from stateeval.core import Task, TrialResult, TurnRecord, Verdict, run_trial
 
 
 SUPPORT_SESSION_ID = "S" * 43
@@ -290,6 +290,29 @@ class OutcomeDefinitionTest(TestCase):
                 "os.environ", runtime_environment(**overrides), clear=True
             ), self.assertRaises(RuntimeError):
                 RuntimeConfig.from_environment()
+
+    def test_agent_turn_timeout_covers_the_full_attempt_budget(self) -> None:
+        class Response:
+            status = 200
+
+            def __enter__(self) -> Response:
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                del args
+
+            @staticmethod
+            def read() -> bytes:
+                return b'{"outcome":"completed"}'
+
+        trial = context(snapshot(mock_refund=(), pending_action=()))
+        trial.transcript.clear()
+        with patch(
+            "stateeval.citybuddy.urlopen", return_value=Response()
+        ) as opener:
+            self.adapter.send_turn(trial, HOSTILE_TASK.turns[0])
+
+        self.assertEqual(495.0, opener.call_args.kwargs["timeout"])
 
     def test_requested_refund_is_the_authorization_failure(self) -> None:
         trial = context(
@@ -584,6 +607,7 @@ class OutcomeDefinitionTest(TestCase):
             'STATEEVAL_PROXY_ATTESTATION:-}" != "$expected_proxy_attestation"',
             script,
         )
+        self.assertIn("AGENT_ATTEMPT_BUDGET=16 \\", script)
 
         launches = script[script.index("\nstart_agent \\\n  control \\\n") :]
         control, measured = launches.split(
@@ -942,6 +966,35 @@ class OutcomeDefinitionTest(TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "sandbox cleanup failed"):
             adapter.cleanup(trial)
+
+        self.assertEqual(
+            [trial.target_owner.sandbox_id, trial.actor.sandbox_id], completed
+        )
+
+    def test_empty_turn_failure_is_not_masked_by_event_capture(self) -> None:
+        trial = context(snapshot(mock_refund=(), pending_action=()))
+        trial.transcript.clear()
+        adapter = CityBuddyAdapter(config(), Path("/not-used"), mode="ownership_on")
+        completed: list[str] = []
+
+        def fail_turn(current: TrialContext, turn: object) -> dict[str, object]:
+            del current, turn
+            raise TimeoutError("agent turn timed out")
+
+        def unexpected_capture(current: TrialContext) -> None:
+            del current
+            raise AssertionError("empty transcript reached event capture")
+
+        adapter.prepare = lambda task: trial  # type: ignore[method-assign]
+        adapter.send_turn = fail_turn  # type: ignore[method-assign]
+        adapter._write_json = lambda path, value: None  # type: ignore[method-assign]
+        adapter._capture_agent_events = unexpected_capture  # type: ignore[method-assign]
+        adapter._complete_sandbox = (  # type: ignore[method-assign]
+            lambda identity: completed.append(identity.sandbox_id)
+        )
+
+        with self.assertRaisesRegex(TimeoutError, "agent turn timed out"):
+            run_trial(HOSTILE_TASK, adapter)
 
         self.assertEqual(
             [trial.target_owner.sandbox_id, trial.actor.sandbox_id], completed
@@ -1463,7 +1516,9 @@ class OwnershipAblationTest(TestCase):
                 boundary["temperature"],
             )
             self.assertIsInstance(boundary["temperature"]["valueSent"], float)
+            self.assertEqual(16, boundary["attemptBudgetPerTurn"])
             self.assertEqual(30.0, boundary["modelRequestTimeoutSeconds"])
+            self.assertEqual(495.0, boundary["agentTurnTimeoutSeconds"])
             self.assertEqual(
                 {
                     "name": "CLIProxyAPI",

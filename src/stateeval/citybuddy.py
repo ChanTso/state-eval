@@ -41,6 +41,9 @@ PROXY_BINARY_SHA256 = (
 PROVIDER_RESPONSE_METADATA_STATEMENT = (
     "No system_fingerprint or upstream snapshot was returned."
 )
+ATTEMPT_BUDGET_PER_TURN = 16
+MAX_TOOL_TIMEOUT_SECONDS = 3.0
+TURN_COMPLETION_OVERHEAD_SECONDS = 15.0
 
 
 HOSTILE_TASK = Task(
@@ -176,6 +179,16 @@ class RuntimeConfig:
         )
 
 
+def agent_turn_timeout_seconds(config: RuntimeConfig) -> float:
+    # The harness must let CityBuddy spend its full attempt budget. A shorter outer
+    # timeout can cut off an arm after tool feedback while its bounded turn is still live.
+    slowest_attempt = max(config.model_timeout_seconds, MAX_TOOL_TIMEOUT_SECONDS)
+    return (
+        ATTEMPT_BUDGET_PER_TURN * slowest_attempt
+        + TURN_COMPLETION_OVERHEAD_SECONDS
+    )
+
+
 @dataclass(frozen=True)
 class EvaluationIdentity:
     sandbox_id: str
@@ -263,6 +276,7 @@ class HttpClient:
         expected_status: int,
         headers: Mapping[str, str] | None = None,
         body: Mapping[str, object] | None = None,
+        timeout_seconds: float = 15.0,
     ) -> Mapping[str, object]:
         encoded = None
         request_headers = dict(headers or {})
@@ -270,7 +284,7 @@ class HttpClient:
             encoded = json.dumps(body, separators=(",", ":")).encode()
             request_headers["Content-Type"] = "application/json"
         request = Request(url, data=encoded, headers=request_headers, method=method)
-        with urlopen(request, timeout=15) as response:
+        with urlopen(request, timeout=timeout_seconds) as response:
             status = response.status
             payload = response.read()
         if status != expected_status:
@@ -401,6 +415,7 @@ class CityBuddyAdapter:
                 "Idempotency-Key": f"{trial.label}-turn-{trial.turn_index}-{uuid_text()}",
             },
             body={"message": message},
+            timeout_seconds=agent_turn_timeout_seconds(self.config),
         )
         record = {
             "turn": trial.turn_index,
@@ -490,10 +505,11 @@ class CityBuddyAdapter:
             )
         except Exception as error:
             cleanup_errors.append(error)
-        try:
-            self._capture_agent_events(trial)
-        except Exception as error:
-            cleanup_errors.append(error)
+        if trial.transcript:
+            try:
+                self._capture_agent_events(trial)
+            except Exception as error:
+                cleanup_errors.append(error)
         cleanup_errors.extend(self._complete_sandboxes(trial.sandboxes))
         if cleanup_errors:
             raise RuntimeError("Evaluation sandbox cleanup failed") from cleanup_errors[0]
@@ -1366,6 +1382,7 @@ def run_boundary(config: RuntimeConfig) -> Mapping[str, object]:
             "upstreamHonouring": "unverified",
         },
         "modelRequestTimeoutSeconds": config.model_timeout_seconds,
+        "agentTurnTimeoutSeconds": agent_turn_timeout_seconds(config),
         "proxy": {
             "name": "CLIProxyAPI",
             "version": PROXY_VERSION,
@@ -1385,7 +1402,7 @@ def run_boundary(config: RuntimeConfig) -> Mapping[str, object]:
                 "not captured from paired trial responses"
             ),
         },
-        "attemptBudgetPerTurn": 16,
+        "attemptBudgetPerTurn": ATTEMPT_BUDGET_PER_TURN,
         "toolSet": [
             "catalog.product.get",
             "knowledge.search",
