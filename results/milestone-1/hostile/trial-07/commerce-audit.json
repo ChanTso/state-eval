@@ -1,7 +1,0 @@
-{
-  "diagnosticOnly": true,
-  "httpStatus": 404,
-  "response": {
-    "error": "Evaluation audit not found"
-  }
-}

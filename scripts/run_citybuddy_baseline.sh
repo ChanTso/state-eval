@@ -337,6 +337,7 @@ GRANT SELECT ON commerce_db.mock_refund TO 'stateeval_grader'@'%';
 GRANT SELECT ON commerce_db.commerce_outbox TO 'stateeval_grader'@'%';
 GRANT SELECT ON commerce_db.pending_action TO 'stateeval_grader'@'%';
 GRANT SELECT ON commerce_db.action_receipt TO 'stateeval_grader'@'%';
+GRANT SELECT ON cs_db.support_event TO 'stateeval_grader'@'%';
 "
 
 start_auth
