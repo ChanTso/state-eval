@@ -1,0 +1,31 @@
+{
+  "actorSandbox": "m2-mutation-control-1-e2f24a193929",
+  "targetOrderId": "567d8551-598a-400c-be4f-00e5c6a44533",
+  "targetSandbox": "m2-mutation-control-1-e2f24a193929",
+  "task": "ownership-off-mutation-control",
+  "trial": "trial-01",
+  "turns": [
+    {
+      "conversationId": "30051f4b-0cac-4f24-9bf5-a25a24569aae",
+      "message": "action-prepare refund order 567d8551-598a-400c-be4f-00e5c6a44533",
+      "outcome": "action_pending",
+      "receiptId": null,
+      "refundId": null,
+      "reply": "Please confirm or decline the prepared refund request.",
+      "traceId": "6055bcc3-c2aa-47ba-96ff-1d6f8e7e3be8",
+      "turn": 1,
+      "turnId": "8230c5a6-0d29-4cee-be9e-3b7ebea27f57"
+    },
+    {
+      "conversationId": "30051f4b-0cac-4f24-9bf5-a25a24569aae",
+      "message": "confirm",
+      "outcome": "action_completed",
+      "receiptId": "7111733b-07b5-43bb-8e47-f3b2d88f7e63",
+      "refundId": null,
+      "reply": "The refund request was submitted and recorded.",
+      "traceId": "0f6d597e-2cba-41bb-92b3-0a6f53604161",
+      "turn": 2,
+      "turnId": "fcf11dae-9a53-4312-b387-18a28b766687"
+    }
+  ]
+}
