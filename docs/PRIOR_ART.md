@@ -1,6 +1,6 @@
 # Prior art
 
-Last checked: 2026-08-24.
+Last checked: 2026-08-29.
 
 Agent evaluation turns over in months — the tau line went from tau-bench to tau3-bench in about
 eighteen — so a stale version of this file is worse than none. Two rules keep it honest:
@@ -15,10 +15,9 @@ Keep entries to three lines. This is a map of the neighbourhood, not a literatur
 
 ## Final-state evaluation
 
-**tau-bench** — searched only
-Customer-service agents across retail and airline domains. Judges success by comparing the final
-database state against a ground-truth target state rather than by tool-call syntax.
-ICLR 2025 · https://iclr.cc/virtual/2025/poster/28170
+**tau-bench** — read (methods, construction, and evaluation; arXiv v1)
+Synthetic retail/airline JSON databases use deterministic Python APIs; reward combines exact final-state equality, required-response substrings, and repeated-trial pass^k.
+ICLR 2025 · https://iclr.cc/virtual/2025/poster/28170 · https://arxiv.org/abs/2406.12045
 
 **tau2-bench** — searched only
 Dual-control successor: agent and user both hold tools and act on one shared environment, modelled
@@ -36,11 +35,9 @@ its database as the oracle and its ground_truth ignored. Nothing here is verifie
 
 ## Enforcement ablation
 
-**From Tool Connection to Execution Control: Benchmarking Security Invariants in MCP-Style Agent
-Runtimes** — searched only
-Counterfactual ablation that disables one enforcement component at a time and counts what each
-removal exposes: grant matching 6 of 10 cases, approval gate 2, handle-owner check 1.
-arXiv 2606.29073 · the closest published work to this project's v1 question.
+**From Tool Connection to Execution Control: Benchmarking Security Invariants in MCP-Style Agent Runtimes** — read (methods, evaluation, ablation, and limitations; arXiv v1)
+Ten JSON fixtures exercise an in-memory reference runtime and two MCP-like baselines; ablations expose grant matching 6/10, approval 2, handle ownership 1, and data-pipe target policy 1.
+arXiv 2606.29073v1 preprint · https://arxiv.org/abs/2606.29073
 
 **AgentBound** — searched only
 The paper is "Behavioral Governance for Autonomous AI Agents: The AgentBound Framework"; the
@@ -60,15 +57,14 @@ arXiv 2605.26269
 
 ## Where StateEval sits
 
-This is a claim to be tested by reading, not an established position.
+The method here is not new. tau-bench compares final synthetic database state with an annotated
+goal; Liu ablates execution-control components and already models principal/resource binding.
 
-The method here is not new. Final-state judging is tau-bench's, and one-component-at-a-time
-enforcement ablation is already published. What may differ is the substrate: the environments
-above either simulate authorization or wrap it in a governance shell outside the agent, whereas
-CityBuddy enforces a real OBO token-exchange chain — JWKS rotation, exact scopes, actor binding —
-inside the service being called. Ablating a production-shaped enforcement path is a different
-claim from ablating a policy wrapper.
+The distinction that survives is empirical substrate and ablation granularity: neither paper
+ablates ownership binding inside a production-shaped OBO service path and grades the resulting
+authoritative business state.
 
-If that distinction does not survive reading arXiv 2606.29073 and tau-bench's evaluation section,
-record that here plainly and drop the claim. StateEval's v1 finding stands on being a real
-measurement, not on being first.
+Do not describe the Handle-Capability Protocol (HCP) as merely a governance shell: it is an
+execution-path broker, but its evaluated artifact is an in-memory reference runtime with
+mock/reference providers and harness-only bypasses, explicitly excluding production OAuth
+machinery, cryptography, persistence, and sandboxing.
