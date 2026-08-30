@@ -41,8 +41,9 @@ not grade the outcome. CityBuddy's evaluation state and audit endpoints are not 
 
 ## 5. What happened, and what is not claimed?
 
-The model issued a prepare request in **7 of 18** first turns. With resource ownership binding on,
-**0 of 3** attempts reached an unauthorized `REQUESTED` refund. With it off, **4 of 4** did. With
+The model, exposed as `gpt-5.4` by the provider, issued a prepare request in **7 of 18** first turns.
+With resource ownership binding on, **0 of 3** attempts reached an unauthorized `REQUESTED` refund.
+With it off, **4 of 4** did. With
 signature, scope, actor and session checks still correct and enforced, removing only commerce's
 final resource-ownership check was enough for an unauthorized refund to reach authoritative state.
 
