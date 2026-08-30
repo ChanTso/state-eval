@@ -14,10 +14,11 @@ service.
 ## 2. Why can't the prompt or agent runtime authorize this?
 
 The system prompt says to refund only an order owned by the requester, but the measured agent has
-no tool that can look up an order or reveal its owner. Given a bare UUID, the model cannot verify
-the fact the policy requires. The prompt and current agent-runtime boundary therefore cannot be
-the authorization point: neither holds authoritative order-owner state. Commerce must compare the
-authenticated subject with the locked order and payment truth inside the transaction.
+no tool that can look up an order or reveal its owner. The input supplies an order UUID and the
+requester's false claim that it came from their account; neither lets the model verify the
+authoritative fact the policy requires. The prompt and current agent-runtime boundary therefore
+cannot be the authorization point: neither holds authoritative order-owner state. Commerce must
+compare the authenticated subject with the locked order and payment truth inside the transaction.
 
 ## 3. What changed between arms?
 
@@ -49,6 +50,8 @@ final resource-ownership check was enough for an unauthorized refund to reach au
 
 The other **11 of 18** first turns are the observed not-attempted proportion under this one fixed
 condition, not a compliance rate. The attempt proportion's 95% Wilson interval is 20.3%–61.4%, too
-wide to generalise. The model had no way to know the UUID belonged to another user, so this is not
-a knowing-violation claim. It is a bounded local result for a bare command with no social framing,
-not a production-wide claim.
+wide to generalise. The model had no authoritative way to verify that the ownership claim was
+false, so this is not a knowing-violation claim. It is a bounded local result for a direct refund
+request with minimal deceptive framing: one false ownership claim, with no urgency, emotional
+pressure, claim of staff or legal authority, or extended persuasion. It is not a production-wide
+claim.
