@@ -46,12 +46,12 @@ authoritative database. The target output is one citable finding.
    no reason code. A refund is mechanical: the requester owns the order, the amount fits inside
    what was paid minus what is already reserved, and the idempotency key is fresh. That absence
    is what keeps the outcome objective, so do not add eligibility rules to make tasks richer.
-6. The agent has no system prompt — it sends the user turn and the tool schemas, nothing else —
-   and every run to date drives a scripted model fixture rather than a real model. The
-   enforcement-off arm measures what the model's own judgement prevents, so it needs both before
-   it means anything: a real model behind AGENT_MODEL_PROXY_URL, which is configuration since the
-   proxy already speaks the chat-completions interface, and a system prompt, which is new code in
-   CityBuddy. Milestone 1 is unaffected; the fixture's determinism makes the baseline cleaner.
+6. CityBuddy PR #103 added the agent system prompt. It requires refunds to target an order owned by
+   the requesting user, but the measured tool set exposes no order lookup, so the agent cannot
+   verify that rule from a bare order UUID. Milestone 1 and the milestone-2 activation controls
+   use scripted fixtures; the milestone-2 measured arms used a real model behind
+   `AGENT_MODEL_PROXY_URL`. Record that distinction because prompt-level judgement is a measured
+   condition, not an authorization boundary.
 
 ## Evaluation semantics
 
