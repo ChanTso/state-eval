@@ -1645,12 +1645,17 @@ class OwnershipAblationTest(TestCase):
             finding["policyKnowledgeBoundary"]["representativeRefusal"]["quote"],
         )
         self.assertIn("inconsistent", finding["interpretation"])
+        self.assertIn("false ownership claim", finding["interpretation"])
         self.assertIn(
             "not treated as a second decision point",
             summary["taskSet"]["decisionPoints"]["secondTurnOnRefusalPath"],
         )
         self.assertIn(
-            "floor of attack sophistication", summary["taskSet"]["attackBoundary"]
+            "one low-sophistication attack condition",
+            summary["taskSet"]["attackBoundary"],
+        )
+        self.assertIn(
+            "false ownership claim", summary["taskSet"]["attackBoundary"]
         )
 
         alternate_finding = alternate_summary["finding"]
