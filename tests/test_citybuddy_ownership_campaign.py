@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import subprocess
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from io import StringIO
+from multiprocessing.connection import Connection
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -86,6 +88,8 @@ def fixed_runtime(
         campaign,
         "run_boundary",
         side_effect=lambda runtime: boundary(runtime, marker=boundary_marker),
+    ), patch.object(
+        campaign, "_tracked_changes", return_value=""
     ):
         yield
 
@@ -174,6 +178,8 @@ def initialized_campaign(
     output.mkdir()
     manifest = campaign._manifest(config(), seed, blocks)
     campaign._atomic_create_json(output / "manifest.json", manifest)
+    number, epoch = campaign._next_epoch(output)
+    _pass_activation(config(), output, number, epoch)
     return manifest, campaign._schedule(manifest)
 
 
@@ -208,7 +214,7 @@ def complete_slot(
     slot: Mapping[str, object],
     terminal: Mapping[str, object],
 ) -> Path:
-    attempt = campaign._start_attempt(output, schedule, str(slot["slotId"]))
+    attempt = campaign._start_attempt(output, schedule, str(slot["slotId"]), 1)
     campaign._write_slot_terminal(
         output, schedule, str(slot["slotId"]), attempt, terminal
     )
@@ -246,6 +252,132 @@ def fake_assessed_adapter(
         cleanup_report=report,
         cleanup_report_written=True,
     )
+
+
+def _hold_campaign_in_planned_slot(
+    output_value: str, ready: Connection, release: Connection
+) -> None:
+    def hold_slot(
+        runtime: RuntimeConfig,
+        output: Path,
+        schedule: tuple[Mapping[str, object], ...],
+        slot: Mapping[str, object],
+        attempt: Path,
+    ) -> bool:
+        del runtime, output, schedule
+        ready.send({"slotId": slot["slotId"], "attempt": attempt.name})
+        release.recv()
+        raise KeyboardInterrupt
+
+    try:
+        with fixed_runtime(), patch.object(
+            campaign, "_run_activation_epoch", side_effect=_pass_activation
+        ), patch.object(campaign, "_run_slot", side_effect=hold_slot):
+            campaign.run_ownership_campaign(
+                config(), Path(output_value), seed=17, blocks=1
+            )
+    except KeyboardInterrupt:
+        pass
+    except Exception as error:
+        ready.send({"errorType": type(error).__name__, "message": str(error)})
+
+
+def _hold_campaign_in_clean_preflight(
+    output_value: str, state: Connection, release: Connection
+) -> None:
+    def hold_preflight() -> str:
+        state.send({"phase": "clean-preflight"})
+        release.recv()
+        return ""
+
+    try:
+        with fixed_runtime(), patch.object(
+            campaign, "_tracked_changes", side_effect=hold_preflight
+        ), patch.object(
+            campaign, "_run_activation_epoch", return_value=False
+        ):
+            summary = campaign.run_ownership_campaign(
+                config(), Path(output_value), seed=17, blocks=1
+            )
+        state.send({"status": summary["status"]})
+    except Exception as error:
+        state.send({"errorType": type(error).__name__, "message": str(error)})
+
+
+def _probe_campaign_locks(
+    output_value: str, result_connection: Connection
+) -> None:
+    activation_calls = 0
+    slot_calls = 0
+
+    def activation(*args: object, **kwargs: object) -> bool:
+        nonlocal activation_calls
+        del args, kwargs
+        activation_calls += 1
+        return False
+
+    def slot(*args: object, **kwargs: object) -> bool:
+        nonlocal slot_calls
+        del args, kwargs
+        slot_calls += 1
+        return False
+
+    outcomes: list[Mapping[str, object]] = []
+    with fixed_runtime(), patch.object(
+        campaign, "_run_activation_epoch", side_effect=activation
+    ), patch.object(campaign, "_run_slot", side_effect=slot):
+        for resume in (False, True):
+            try:
+                if resume:
+                    campaign.run_ownership_campaign(
+                        config(), Path(output_value), resume=True
+                    )
+                else:
+                    campaign.run_ownership_campaign(
+                        config(), Path(output_value), seed=17, blocks=1
+                    )
+            except Exception as error:
+                outcomes.append(
+                    {
+                        "errorType": type(error).__name__,
+                        "message": str(error),
+                    }
+                )
+            else:
+                outcomes.append({"errorType": None, "message": ""})
+    result_connection.send(
+        {
+            "outcomes": outcomes,
+            "activationCalls": activation_calls,
+            "slotCalls": slot_calls,
+        }
+    )
+
+
+def _artifact_snapshot(root: Path) -> Mapping[str, tuple[str, bytes]]:
+    return {
+        path.relative_to(root).as_posix(): (
+            "directory" if path.is_dir() else "file",
+            b"" if path.is_dir() else path.read_bytes(),
+        )
+        for path in sorted(root.rglob("*"))
+    }
+
+
+def _pass_activation(
+    runtime: RuntimeConfig, output: Path, number: int, epoch: Path
+) -> bool:
+    del runtime, output
+    campaign._atomic_create_json(
+        epoch / "terminal.json",
+        {
+            "schema": campaign.SCHEMA,
+            "epoch": number,
+            "status": "passed",
+            "finishedAtUtc": campaign._utc_now(),
+        },
+    )
+    return True
 
 
 class ScheduleAndManifestTest(TestCase):
@@ -417,6 +549,193 @@ class ScheduleAndManifestTest(TestCase):
 
 
 class RecoveryStateMachineTest(TestCase):
+    def test_rejected_bootstrap_lock_closes_its_descriptor(self) -> None:
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary) / "campaign"
+            close = campaign.os.close
+            with patch.object(
+                campaign.fcntl, "flock", side_effect=BlockingIOError
+            ), patch.object(
+                campaign.os, "close", wraps=close
+            ) as close_descriptor, self.assertRaises(
+                campaign.CampaignLockError
+            ):
+                with campaign._campaign_lock(output, resume=False):
+                    self.fail("blocked lock unexpectedly entered the campaign")
+
+            close_descriptor.assert_called_once()
+            self.assertFalse(output.exists())
+
+    def test_fresh_preflight_is_serialized_before_output_creation(self) -> None:
+        process_context = multiprocessing.get_context("fork")
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "campaign"
+            state_parent, state_child = process_context.Pipe()
+            release_parent, release_child = process_context.Pipe()
+            holder = process_context.Process(
+                target=_hold_campaign_in_clean_preflight,
+                args=(str(output), state_child, release_child),
+            )
+            holder.start()
+            state_child.close()
+            release_child.close()
+            try:
+                self.assertTrue(state_parent.poll(10))
+                self.assertEqual(
+                    {"phase": "clean-preflight"}, state_parent.recv()
+                )
+                self.assertFalse(output.exists())
+
+                result_parent, result_child = process_context.Pipe()
+                contender = process_context.Process(
+                    target=_probe_campaign_locks,
+                    args=(str(output), result_child),
+                )
+                contender.start()
+                result_child.close()
+                contender.join(3)
+                if contender.is_alive():
+                    contender.terminate()
+                    contender.join(5)
+                    self.fail("bootstrap lock contender did not fail immediately")
+                probe = result_parent.recv()
+                result_parent.close()
+                self.assertEqual(
+                    ["CampaignLockError", "CampaignLockError"],
+                    [outcome["errorType"] for outcome in probe["outcomes"]],
+                )
+                self.assertEqual(0, probe["activationCalls"])
+                self.assertEqual(0, probe["slotCalls"])
+                self.assertFalse(output.exists())
+
+                release_parent.send(True)
+                self.assertTrue(state_parent.poll(10))
+                self.assertEqual({"status": "partial"}, state_parent.recv())
+                holder.join(5)
+                self.assertEqual(0, holder.exitcode)
+                self.assertTrue((output / "manifest.json").is_file())
+            finally:
+                if holder.is_alive():
+                    holder.terminate()
+                    holder.join(5)
+                state_parent.close()
+                release_parent.close()
+
+    def test_live_campaign_lock_rejects_competitors_then_releases_on_process_death(
+        self,
+    ) -> None:
+        process_context = multiprocessing.get_context("fork")
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "campaign"
+            ready_parent, ready_child = process_context.Pipe()
+            release_parent, release_child = process_context.Pipe()
+            holder = process_context.Process(
+                target=_hold_campaign_in_planned_slot,
+                args=(str(output), ready_child, release_child),
+            )
+            holder.start()
+            ready_child.close()
+            release_child.close()
+            try:
+                self.assertTrue(
+                    ready_parent.poll(10),
+                    "holder did not reach the planned slot",
+                )
+                held_attempt = ready_parent.recv()
+                self.assertNotIn("errorType", held_attempt)
+                self.assertEqual("attempt-0001", held_attempt["attempt"])
+
+                slot_root = output / "slots" / str(held_attempt["slotId"])
+                attempt_one = slot_root / "attempt-0001"
+                self.assertTrue((attempt_one / "started.json").is_file())
+                self.assertFalse((attempt_one / "interrupted.json").exists())
+                before_competitors = _artifact_snapshot(root)
+
+                result_parent, result_child = process_context.Pipe()
+                contender = process_context.Process(
+                    target=_probe_campaign_locks,
+                    args=(str(output), result_child),
+                )
+                contender.start()
+                result_child.close()
+                contender.join(3)
+                if contender.is_alive():
+                    contender.terminate()
+                    contender.join(5)
+                    self.fail("lock contender did not fail immediately")
+                self.assertEqual(0, contender.exitcode)
+                self.assertTrue(result_parent.poll())
+                probe = result_parent.recv()
+                result_parent.close()
+                self.assertEqual(
+                    ["CampaignLockError", "CampaignLockError"],
+                    [outcome["errorType"] for outcome in probe["outcomes"]],
+                )
+                for outcome in probe["outcomes"]:
+                    self.assertIn(
+                        "campaign is already running",
+                        outcome["message"].lower(),
+                    )
+                self.assertEqual(0, probe["activationCalls"])
+                self.assertEqual(0, probe["slotCalls"])
+                self.assertEqual(before_competitors, _artifact_snapshot(root))
+                self.assertFalse((attempt_one / "interrupted.json").exists())
+                self.assertFalse((slot_root / "attempt-0002").exists())
+
+                self.assertTrue(holder.is_alive())
+                holder.terminate()
+                holder.join(5)
+                self.assertFalse(holder.is_alive())
+
+                resumed: list[tuple[str, str]] = []
+
+                def stop_after_orphan_retry(
+                    runtime: RuntimeConfig,
+                    campaign_root: Path,
+                    schedule: tuple[Mapping[str, object], ...],
+                    slot: Mapping[str, object],
+                    attempt: Path,
+                ) -> bool:
+                    del runtime
+                    resumed.append((str(slot["slotId"]), attempt.name))
+                    campaign._write_slot_terminal(
+                        campaign_root,
+                        schedule,
+                        str(slot["slotId"]),
+                        attempt,
+                        inconclusive_terminal(code="synthetic_stop"),
+                    )
+                    return False
+
+                with fixed_runtime(), patch.object(
+                    campaign, "_run_activation_epoch", side_effect=_pass_activation
+                ), patch.object(
+                    campaign, "_run_slot", side_effect=stop_after_orphan_retry
+                ):
+                    summary = campaign.run_ownership_campaign(
+                        config(), output, resume=True
+                    )
+
+                self.assertEqual(
+                    [(str(held_attempt["slotId"]), "attempt-0002")],
+                    resumed,
+                )
+                self.assertTrue((attempt_one / "interrupted.json").is_file())
+                self.assertTrue(
+                    (slot_root / "attempt-0002" / "started.json").is_file()
+                )
+                self.assertEqual(2, summary["counts"]["attemptsStarted"])
+                self.assertEqual(1, summary["counts"]["interruptedAttempts"])
+                self.assertEqual(1, summary["counts"]["extraAttempts"])
+            finally:
+                if holder.is_alive():
+                    holder.terminate()
+                    holder.join(5)
+                ready_parent.close()
+                release_parent.close()
+
     def test_resume_skips_a_measured_terminal_and_only_runs_the_pending_slot(self) -> None:
         with TemporaryDirectory() as temporary, fixed_runtime():
             output = Path(temporary) / "campaign"
@@ -443,7 +762,7 @@ class RecoveryStateMachineTest(TestCase):
                 return True
 
             with patch.object(
-                campaign, "_run_activation_epoch", return_value=True
+                campaign, "_run_activation_epoch", side_effect=_pass_activation
             ), patch.object(campaign, "_run_slot", side_effect=run_pending):
                 summary = campaign.run_ownership_campaign(
                     config(), output, resume=True
@@ -460,7 +779,7 @@ class RecoveryStateMachineTest(TestCase):
             _manifest, schedule = initialized_campaign(output)
             slot = schedule[0]
             attempt = campaign._start_attempt(
-                output, schedule, str(slot["slotId"])
+                output, schedule, str(slot["slotId"]), 1
             )
             adapter = SimpleNamespace(
                 last_context=None,
@@ -486,13 +805,13 @@ class RecoveryStateMachineTest(TestCase):
             )
             self.assertEqual(1, len(campaign._scan_slots(output, schedule)[0].attempts))
             with self.assertRaises(campaign.CampaignStateError):
-                campaign._start_attempt(output, schedule, str(slot["slotId"]))
+                campaign._start_attempt(output, schedule, str(slot["slotId"]), 1)
 
     def test_repeated_keyboard_interrupts_retry_only_the_same_planned_slot(self) -> None:
         with TemporaryDirectory() as temporary:
             output = Path(temporary) / "campaign"
             with fixed_runtime(), patch.object(
-                campaign, "_run_activation_epoch", return_value=True
+                campaign, "_run_activation_epoch", side_effect=_pass_activation
             ), patch.object(campaign, "_run_slot", side_effect=KeyboardInterrupt):
                 with self.assertRaises(KeyboardInterrupt):
                     campaign.run_ownership_campaign(
@@ -572,7 +891,7 @@ class RecoveryStateMachineTest(TestCase):
                         return False
 
                     with patch.object(
-                        campaign, "_run_activation_epoch", return_value=True
+                        campaign, "_run_activation_epoch", side_effect=_pass_activation
                     ), patch.object(
                         campaign, "_run_slot", side_effect=stop_after_retry
                     ):
@@ -599,7 +918,7 @@ class RecoveryStateMachineTest(TestCase):
             _manifest, schedule = initialized_campaign(output)
             denied_slot = schedule[0]
             denied_attempt = campaign._start_attempt(
-                output, schedule, str(denied_slot["slotId"])
+                output, schedule, str(denied_slot["slotId"]), 1
             )
             adapter = fake_assessed_adapter(denied_attempt)
             with patch.object(
@@ -636,7 +955,7 @@ class RecoveryStateMachineTest(TestCase):
                 return True
 
             with patch.object(
-                campaign, "_run_activation_epoch", return_value=True
+                campaign, "_run_activation_epoch", side_effect=_pass_activation
             ), patch.object(campaign, "_run_slot", side_effect=measure_other):
                 summary = campaign.run_ownership_campaign(
                     config(), output, resume=True
@@ -766,9 +1085,8 @@ class ActivationTest(TestCase):
             def activate(
                 runtime: RuntimeConfig, root: Path, number: int, epoch: Path
             ) -> bool:
-                del runtime, root, number, epoch
                 order.append("activation")
-                return True
+                return _pass_activation(runtime, root, number, epoch)
 
             def measure(
                 runtime: RuntimeConfig,
@@ -838,7 +1156,7 @@ class SlotOutcomeTest(TestCase):
             _manifest, schedule = initialized_campaign(output)
             slot = schedule[0]
             attempt = campaign._start_attempt(
-                output, schedule, str(slot["slotId"])
+                output, schedule, str(slot["slotId"]), 1
             )
             order: list[str] = []
 
@@ -908,7 +1226,7 @@ class SlotOutcomeTest(TestCase):
             _manifest, schedule = initialized_campaign(output)
             slot = schedule[0]
             attempt = campaign._start_attempt(
-                output, schedule, str(slot["slotId"])
+                output, schedule, str(slot["slotId"]), 1
             )
             adapter = fake_assessed_adapter(
                 attempt, unauthorized=True, diagnostics_status="failed"
@@ -938,7 +1256,7 @@ class SlotOutcomeTest(TestCase):
             _manifest, schedule = initialized_campaign(output)
             slot = schedule[0]
             attempt = campaign._start_attempt(
-                output, schedule, str(slot["slotId"])
+                output, schedule, str(slot["slotId"]), 1
             )
             adapter = fake_assessed_adapter(attempt)
             with patch.object(
@@ -971,7 +1289,7 @@ class SlotOutcomeTest(TestCase):
             _manifest, schedule = initialized_campaign(output)
             slot = schedule[0]
             attempt = campaign._start_attempt(
-                output, schedule, str(slot["slotId"])
+                output, schedule, str(slot["slotId"]), 1
             )
             adapter = campaign._CampaignCityBuddyAdapter(
                 config(), attempt, mode=campaign.ARM_MODES[str(slot["arm"])]
@@ -1059,7 +1377,7 @@ class SlotOutcomeTest(TestCase):
             _manifest, schedule = initialized_campaign(output)
             slot = schedule[0]
             attempt = campaign._start_attempt(
-                output, schedule, str(slot["slotId"])
+                output, schedule, str(slot["slotId"]), 1
             )
             adapter = campaign._CampaignCityBuddyAdapter(
                 config(), attempt, mode=campaign.ARM_MODES[str(slot["arm"])]
@@ -1130,7 +1448,7 @@ class SummaryAndAppendOnlyTest(TestCase):
 
             first = schedule[0]
             attempt_one = campaign._start_attempt(
-                output, schedule, str(first["slotId"])
+                output, schedule, str(first["slotId"]), 1
             )
             self.assertEqual(
                 (2, 0, 1, 0, 0),
@@ -1142,7 +1460,7 @@ class SummaryAndAppendOnlyTest(TestCase):
                 self._count_tuple(campaign._summary(output, schedule)),
             )
             attempt_two = campaign._start_attempt(
-                output, schedule, str(first["slotId"])
+                output, schedule, str(first["slotId"]), 1
             )
             self.assertEqual(
                 (2, 0, 2, 1, 1),
@@ -1162,7 +1480,7 @@ class SummaryAndAppendOnlyTest(TestCase):
 
             second = schedule[1]
             second_attempt = campaign._start_attempt(
-                output, schedule, str(second["slotId"])
+                output, schedule, str(second["slotId"]), 1
             )
             campaign._write_slot_terminal(
                 output,
@@ -1297,7 +1615,7 @@ class SummaryAndAppendOnlyTest(TestCase):
             _manifest, schedule = initialized_campaign(output)
             slot = schedule[0]
             attempt = campaign._start_attempt(
-                output, schedule, str(slot["slotId"])
+                output, schedule, str(slot["slotId"]), 1
             )
             campaign._atomic_create_json(
                 attempt / "terminal.json",
@@ -1305,8 +1623,10 @@ class SummaryAndAppendOnlyTest(TestCase):
                     "schema": campaign.SCHEMA,
                     "slotId": slot["slotId"],
                     "attempt": 1,
+                    "activationEpoch": 1,
                     "taskId": slot["taskId"],
                     "arm": slot["arm"],
+                    "finishedAtUtc": campaign._utc_now(),
                     "status": "measured",
                     "measurement": {
                         "sqlUnauthorizedRefund": 1,
@@ -1330,7 +1650,7 @@ class SummaryAndAppendOnlyTest(TestCase):
             _manifest, schedule = initialized_campaign(output)
             slot = schedule[0]
             attempt = campaign._start_attempt(
-                output, schedule, str(slot["slotId"])
+                output, schedule, str(slot["slotId"]), 1
             )
             invalid = dict(measured_terminal())
             invalid["measurement"] = {
@@ -1349,4 +1669,470 @@ class SummaryAndAppendOnlyTest(TestCase):
                     str(slot["slotId"]),
                     attempt,
                     invalid,
+                )
+
+
+class UtcTimestampArtifactTest(TestCase):
+    def test_fake_clock_is_recorded_across_the_append_only_lifecycle(self) -> None:
+        timestamps = [
+            "2026-09-01T00:00:00.000001Z",
+            "2026-09-01T00:00:01.000002Z",
+            "2026-09-01T00:00:02.000003Z",
+            "2026-09-01T00:00:03.000004Z",
+            "2026-09-01T00:00:04.000005Z",
+            "2026-09-01T00:00:05.000006Z",
+            "2026-09-01T00:00:06.000007Z",
+            "2026-09-01T00:00:07.000008Z",
+            "2026-09-01T00:00:08.000009Z",
+        ]
+        with TemporaryDirectory() as temporary, fixed_runtime(), patch.object(
+            campaign, "_utc_now", side_effect=timestamps
+        ):
+            output = Path(temporary) / "campaign"
+            output.mkdir()
+            manifest = campaign._manifest(config(), seed=17, blocks=1)
+            campaign._atomic_create_json(output / "manifest.json", manifest)
+            schedule = campaign._schedule(manifest)
+
+            first_epoch_number, first_epoch = campaign._next_epoch(output)
+            self.assertTrue(
+                _pass_activation(
+                    config(), output, first_epoch_number, first_epoch
+                )
+            )
+            slot = schedule[0]
+            first_attempt = campaign._start_attempt(
+                output,
+                schedule,
+                str(slot["slotId"]),
+                first_epoch_number,
+            )
+            campaign._interrupt_dangling_attempts(output, schedule)
+
+            second_epoch_number, second_epoch = campaign._next_epoch(output)
+            self.assertTrue(
+                _pass_activation(
+                    config(), output, second_epoch_number, second_epoch
+                )
+            )
+            second_attempt = campaign._start_attempt(
+                output,
+                schedule,
+                str(slot["slotId"]),
+                second_epoch_number,
+            )
+            campaign._write_slot_terminal(
+                output,
+                schedule,
+                str(slot["slotId"]),
+                second_attempt,
+                measured_terminal(),
+            )
+
+            self.assertEqual(timestamps[0], manifest["createdAtUtc"])
+            self.assertEqual(
+                timestamps[1],
+                json.loads((first_epoch / "started.json").read_bytes())[
+                    "startedAtUtc"
+                ],
+            )
+            self.assertEqual(
+                timestamps[2],
+                json.loads((first_epoch / "terminal.json").read_bytes())[
+                    "finishedAtUtc"
+                ],
+            )
+            self.assertEqual(
+                timestamps[3],
+                json.loads((first_attempt / "started.json").read_bytes())[
+                    "startedAtUtc"
+                ],
+            )
+            self.assertEqual(
+                timestamps[4],
+                json.loads((first_attempt / "interrupted.json").read_bytes())[
+                    "interruptedAtUtc"
+                ],
+            )
+            self.assertEqual(
+                timestamps[5],
+                json.loads((second_epoch / "started.json").read_bytes())[
+                    "startedAtUtc"
+                ],
+            )
+            self.assertEqual(
+                timestamps[6],
+                json.loads((second_epoch / "terminal.json").read_bytes())[
+                    "finishedAtUtc"
+                ],
+            )
+            self.assertEqual(
+                timestamps[7],
+                json.loads((second_attempt / "started.json").read_bytes())[
+                    "startedAtUtc"
+                ],
+            )
+            self.assertEqual(
+                timestamps[8],
+                json.loads((second_attempt / "terminal.json").read_bytes())[
+                    "finishedAtUtc"
+                ],
+            )
+            self.assertEqual(
+                {
+                    "firstStartedAtUtc": timestamps[1],
+                    "lastTerminalAtUtc": timestamps[8],
+                },
+                campaign._summary(output, schedule)["timeWindow"],
+            )
+
+    def test_manifest_only_summary_has_no_execution_window(self) -> None:
+        created = "2026-09-01T01:02:03.000004Z"
+        with TemporaryDirectory() as temporary, fixed_runtime(), patch.object(
+            campaign, "_utc_now", return_value=created
+        ):
+            output = Path(temporary) / "campaign"
+            output.mkdir()
+            manifest = campaign._manifest(config(), seed=17, blocks=1)
+            campaign._atomic_create_json(output / "manifest.json", manifest)
+
+            self.assertEqual(created, manifest["createdAtUtc"])
+            self.assertEqual(
+                {
+                    "firstStartedAtUtc": None,
+                    "lastTerminalAtUtc": None,
+                },
+                campaign._summary(output, campaign._schedule(manifest))[
+                    "timeWindow"
+                ],
+            )
+
+    def test_resume_keeps_the_timestamped_manifest_bytes(self) -> None:
+        timestamp = "2026-09-01T02:00:00.000001Z"
+        with TemporaryDirectory() as temporary, fixed_runtime(), patch.object(
+            campaign, "_utc_now", return_value=timestamp
+        ):
+            output = Path(temporary) / "campaign"
+            _manifest, schedule = initialized_campaign(output)
+            for slot in schedule:
+                complete_slot(output, schedule, slot, measured_terminal())
+            original = (output / "manifest.json").read_bytes()
+
+            with patch.object(
+                campaign, "_run_activation_epoch"
+            ) as activation, patch.object(campaign, "_run_slot") as run_slot:
+                summary = campaign.run_ownership_campaign(
+                    config(), output, resume=True
+                )
+
+            self.assertEqual("complete", summary["status"])
+            self.assertEqual(original, (output / "manifest.json").read_bytes())
+            activation.assert_not_called()
+            run_slot.assert_not_called()
+
+    def test_resume_rejects_missing_or_malformed_timestamps_before_callbacks(
+        self,
+    ) -> None:
+        def remove_manifest_created_at(
+            output: Path,
+            schedule: tuple[Mapping[str, object], ...],
+        ) -> None:
+            del schedule
+            path = output / "manifest.json"
+            value = dict(json.loads(path.read_bytes()))
+            value.pop("createdAtUtc")
+            path.write_bytes(campaign._json_bytes(value))
+
+        def corrupt_activation_finished_at(
+            output: Path,
+            schedule: tuple[Mapping[str, object], ...],
+        ) -> None:
+            del schedule
+            path = output / "activations" / "epoch-0001" / "terminal.json"
+            value = dict(json.loads(path.read_bytes()))
+            value["finishedAtUtc"] = "2026-09-01T00:00:00+00:00"
+            path.write_bytes(campaign._json_bytes(value))
+
+        def remove_attempt_started_at(
+            output: Path,
+            schedule: tuple[Mapping[str, object], ...],
+        ) -> None:
+            slot = schedule[0]
+            attempt = campaign._start_attempt(
+                output, schedule, str(slot["slotId"]), 1
+            )
+            path = attempt / "started.json"
+            value = dict(json.loads(path.read_bytes()))
+            value.pop("startedAtUtc")
+            path.write_bytes(campaign._json_bytes(value))
+
+        corruptions = {
+            "missing manifest createdAtUtc": remove_manifest_created_at,
+            "malformed activation finishedAtUtc": corrupt_activation_finished_at,
+            "missing attempt startedAtUtc": remove_attempt_started_at,
+        }
+        with TemporaryDirectory() as temporary, fixed_runtime():
+            root = Path(temporary)
+            for index, (label, corrupt) in enumerate(corruptions.items()):
+                with self.subTest(label):
+                    output = root / f"campaign-{index}"
+                    _manifest, schedule = initialized_campaign(output)
+                    corrupt(output, schedule)
+                    with patch.object(
+                        campaign, "_run_activation_epoch"
+                    ) as activation, patch.object(
+                        campaign, "_run_slot"
+                    ) as run_slot, self.assertRaisesRegex(
+                        campaign.CampaignStateError, "RFC3339 UTC timestamp"
+                    ):
+                        campaign.run_ownership_campaign(
+                            config(), output, resume=True
+                        )
+                    activation.assert_not_called()
+                    run_slot.assert_not_called()
+
+
+class DirtyCheckoutPreflightTest(TestCase):
+    def test_fresh_rejects_tracked_worktree_and_index_changes_before_callbacks(
+        self,
+    ) -> None:
+        dirty_states = {
+            "tracked worktree": (
+                " M src/stateeval/citybuddy_ownership_campaign.py\n"
+            ),
+            "index": "M  src/stateeval/citybuddy_ownership_campaign.py\n",
+        }
+        for label, porcelain in dirty_states.items():
+            with self.subTest(label=label), TemporaryDirectory() as temporary:
+                output = Path(temporary) / "campaign"
+                with patch.object(
+                    campaign, "_tracked_changes", return_value=porcelain
+                ), patch.object(campaign, "_manifest") as manifest, patch.object(
+                    campaign, "_run_activation_epoch"
+                ) as activation, patch.object(
+                    campaign, "_start_attempt"
+                ) as start_attempt, patch.object(
+                    campaign, "_run_slot"
+                ) as run_slot, self.assertRaisesRegex(
+                    campaign.CampaignStateError,
+                    "tracked worktree or index is dirty",
+                ):
+                    campaign.run_ownership_campaign(
+                        object(),  # type: ignore[arg-type]
+                        output,
+                        seed=11,
+                        blocks=1,
+                    )
+
+                self.assertFalse(output.exists())
+                manifest.assert_not_called()
+                activation.assert_not_called()
+                start_attempt.assert_not_called()
+                run_slot.assert_not_called()
+
+                with fixed_runtime(), patch.object(
+                    campaign, "_run_activation_epoch", return_value=False
+                ):
+                    campaign.run_ownership_campaign(
+                        config(), output, seed=11, blocks=1
+                    )
+                self.assertTrue((output / "manifest.json").is_file())
+
+    def test_resume_dirty_rejection_precedes_orphan_repair_and_changes_no_bytes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary) / "campaign"
+            attempt = output / "slots" / "planned-slot" / "attempt-0001"
+            attempt.mkdir(parents=True)
+            (output / ".campaign.lock").write_bytes(b"lock sentinel\n")
+            (output / "manifest.json").write_bytes(b"immutable manifest\n")
+            (attempt / "started.json").write_bytes(b"dangling attempt\n")
+
+            def artifact_bytes() -> Mapping[str, bytes]:
+                return {
+                    path.relative_to(output).as_posix(): path.read_bytes()
+                    for path in sorted(output.rglob("*"))
+                    if path.is_file()
+                }
+
+            before = artifact_bytes()
+            with patch.object(
+                campaign,
+                "_tracked_changes",
+                return_value=" M src/stateeval/citybuddy_ownership_campaign.py\n",
+            ), patch.object(campaign, "_load_manifest") as load_manifest, patch.object(
+                campaign, "_repair_unpublished_attempts"
+            ) as repair, patch.object(
+                campaign, "_interrupt_dangling_attempts"
+            ) as interrupt, patch.object(
+                campaign, "_run_activation_epoch"
+            ) as activation, patch.object(
+                campaign, "_start_attempt"
+            ) as start_attempt, patch.object(
+                campaign, "_run_slot"
+            ) as run_slot, self.assertRaisesRegex(
+                campaign.CampaignStateError,
+                "tracked worktree or index is dirty",
+            ):
+                campaign.run_ownership_campaign(
+                    object(),  # type: ignore[arg-type]
+                    output,
+                    resume=True,
+                )
+
+            self.assertEqual(before, artifact_bytes())
+            self.assertFalse((attempt / "interrupted.json").exists())
+            load_manifest.assert_not_called()
+            repair.assert_not_called()
+            interrupt.assert_not_called()
+            activation.assert_not_called()
+            start_attempt.assert_not_called()
+            run_slot.assert_not_called()
+
+    def test_tracked_changes_explicitly_ignores_untracked_files(self) -> None:
+        repository = Path("/synthetic/stateeval")
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with patch.object(
+            campaign, "_repository_root", return_value=repository
+        ), patch.object(
+            campaign.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertEqual("", campaign._tracked_changes())
+
+        run.assert_called_once_with(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=no",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+class ActivationEpochBindingTest(TestCase):
+    def test_orphan_retry_binds_each_attempt_to_its_own_passed_epoch(self) -> None:
+        with TemporaryDirectory() as temporary, fixed_runtime():
+            output = Path(temporary) / "campaign"
+            _manifest, schedule = initialized_campaign(output)
+            slot = schedule[0]
+            slot_id = str(slot["slotId"])
+            attempt_one = campaign._start_attempt(
+                output, schedule, slot_id, 1
+            )
+            resumed: list[tuple[str, str]] = []
+
+            def stop_after_retry(
+                runtime: RuntimeConfig,
+                campaign_root: Path,
+                immutable_schedule: tuple[Mapping[str, object], ...],
+                retried_slot: Mapping[str, object],
+                attempt: Path,
+            ) -> bool:
+                del runtime
+                resumed.append((str(retried_slot["slotId"]), attempt.name))
+                campaign._write_slot_terminal(
+                    campaign_root,
+                    immutable_schedule,
+                    str(retried_slot["slotId"]),
+                    attempt,
+                    inconclusive_terminal(code="synthetic_stop"),
+                )
+                return False
+
+            with patch.object(
+                campaign, "_run_activation_epoch", side_effect=_pass_activation
+            ), patch.object(campaign, "_run_slot", side_effect=stop_after_retry):
+                summary = campaign.run_ownership_campaign(
+                    config(), output, resume=True
+                )
+
+            attempt_two = attempt_one.parent / "attempt-0002"
+            first_started = json.loads(
+                (attempt_one / "started.json").read_bytes()
+            )
+            first_interrupted = json.loads(
+                (attempt_one / "interrupted.json").read_bytes()
+            )
+            second_started = json.loads(
+                (attempt_two / "started.json").read_bytes()
+            )
+            second_terminal = json.loads(
+                (attempt_two / "terminal.json").read_bytes()
+            )
+
+            self.assertEqual([(slot_id, "attempt-0002")], resumed)
+            self.assertEqual(1, first_started["activationEpoch"])
+            self.assertEqual(1, first_interrupted["activationEpoch"])
+            self.assertEqual(2, second_started["activationEpoch"])
+            self.assertEqual(2, second_terminal["activationEpoch"])
+            self.assertEqual(
+                "passed",
+                json.loads(
+                    (
+                        output
+                        / "activations"
+                        / "epoch-0002"
+                        / "terminal.json"
+                    ).read_bytes()
+                )["status"],
+            )
+            self.assertEqual(2, summary["counts"]["attemptsStarted"])
+            self.assertEqual(1, summary["counts"]["interruptedAttempts"])
+            self.assertEqual(1, summary["counts"]["extraAttempts"])
+
+    def test_resume_rejects_invalid_referenced_activation_epochs(self) -> None:
+        for corruption, expected in (
+            ("tampered", "did not pass"),
+            ("missing", "Cannot read campaign artifact"),
+            ("failed", "did not pass"),
+        ):
+            with self.subTest(
+                corruption=corruption
+            ), TemporaryDirectory() as temporary, fixed_runtime():
+                output = Path(temporary) / "campaign"
+                _manifest, schedule = initialized_campaign(output)
+                slot = schedule[0]
+                attempt = campaign._start_attempt(
+                    output, schedule, str(slot["slotId"]), 1
+                )
+                epoch = output / "activations" / "epoch-0001"
+                artifact = (
+                    epoch / "started.json"
+                    if corruption == "tampered"
+                    else epoch / "terminal.json"
+                )
+                if corruption == "missing":
+                    artifact.unlink()
+                else:
+                    value = json.loads(artifact.read_bytes())
+                    if corruption == "tampered":
+                        value["epoch"] = 2
+                    else:
+                        value["status"] = "failed"
+                    artifact.write_bytes(campaign._json_bytes(value))
+
+                with patch.object(
+                    campaign, "_run_activation_epoch"
+                ) as activation, patch.object(
+                    campaign, "_run_slot"
+                ) as run_slot, self.assertRaisesRegex(
+                    campaign.CampaignStateError, expected
+                ):
+                    campaign.run_ownership_campaign(
+                        config(), output, resume=True
+                    )
+
+                activation.assert_not_called()
+                run_slot.assert_not_called()
+                self.assertFalse((attempt / "interrupted.json").exists())
+                self.assertFalse(
+                    (output / "activations" / "epoch-0002").exists()
                 )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -8,8 +9,10 @@ import random
 import re
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -45,9 +48,16 @@ ARM_MODES: Mapping[str, Literal["ownership_on", "ownership_off"]] = {
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
 _ATTEMPT_NAME = re.compile(r"attempt-(\d{4})")
 _EPOCH_NAME = re.compile(r"epoch-(\d{4})")
+_UTC_RFC3339 = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z"
+)
 
 
 class CampaignStateError(RuntimeError):
+    pass
+
+
+class CampaignLockError(CampaignStateError):
     pass
 
 
@@ -81,6 +91,131 @@ class _SlotState:
 
 def _json_bytes(value: object) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _require_utc_timestamp(value: object, name: str) -> str:
+    if not isinstance(value, str) or _UTC_RFC3339.fullmatch(value) is None:
+        raise CampaignStateError(f"{name} must be an RFC3339 UTC timestamp")
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError as error:
+        raise CampaignStateError(
+            f"{name} must be an RFC3339 UTC timestamp"
+        ) from error
+    return value
+
+
+def _acquire_campaign_lock(descriptor: int, output: Path) -> None:
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        raise CampaignLockError(
+            f"Campaign is already running: {output}"
+        ) from error
+
+
+@contextmanager
+def _campaign_lock(output: Path, *, resume: bool) -> Iterator[None]:
+    parent = output.parent
+    if not resume:
+        parent.mkdir(parents=True, exist_ok=True)
+    if not parent.is_dir():
+        raise CampaignStateError("Campaign output parent does not exist")
+
+    bootstrap_path = parent / f".{output.name}.campaign-bootstrap.lock"
+    bootstrap: int | None = os.open(
+        bootstrap_path, os.O_RDWR | os.O_CREAT, 0o600
+    )
+    bootstrap_locked = False
+    descriptor: int | None = None
+    locked = False
+    try:
+        assert bootstrap is not None
+        _acquire_campaign_lock(bootstrap, output)
+        bootstrap_locked = True
+
+        if output.exists():
+            if not output.is_dir():
+                if resume:
+                    raise CampaignStateError("Resume output does not exist")
+                raise FileExistsError(
+                    f"Campaign output already exists: {output}"
+                )
+            lock_path = output / ".campaign.lock"
+            if not resume and not lock_path.is_file():
+                raise FileExistsError(
+                    f"Campaign output already exists: {output}"
+                )
+            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            _acquire_campaign_lock(descriptor, output)
+            locked = True
+            if not resume:
+                raise FileExistsError(
+                    f"Campaign output already exists: {output}"
+                )
+        else:
+            if resume:
+                raise CampaignStateError("Resume output does not exist")
+            _require_clean_tracked_worktree()
+            output.mkdir(exist_ok=False)
+            descriptor = os.open(
+                output / ".campaign.lock", os.O_RDWR | os.O_CREAT, 0o600
+            )
+            _acquire_campaign_lock(descriptor, output)
+            locked = True
+
+        if resume:
+            _require_clean_tracked_worktree()
+        fcntl.flock(bootstrap, fcntl.LOCK_UN)
+        bootstrap_locked = False
+        os.close(bootstrap)
+        bootstrap = None
+        yield
+    finally:
+        if descriptor is not None:
+            try:
+                if locked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+        if bootstrap is not None:
+            try:
+                if bootstrap_locked:
+                    fcntl.flock(bootstrap, fcntl.LOCK_UN)
+            finally:
+                os.close(bootstrap)
+
+
+def _repository_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _tracked_changes() -> str:
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(_repository_root()),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=no",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout
+
+
+def _require_clean_tracked_worktree() -> None:
+    if _tracked_changes().strip():
+        raise CampaignStateError(
+            "StateEval tracked worktree or index is dirty"
+        )
 
 
 def _fsync_parent(path: Path) -> None:
@@ -158,9 +293,8 @@ def _task_json(task: Task) -> Mapping[str, object]:
 
 
 def _stateeval_commit() -> str:
-    repository = Path(__file__).resolve().parents[2]
     completed = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        ["git", "-C", str(_repository_root()), "rev-parse", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
@@ -203,6 +337,7 @@ def _manifest(config: RuntimeConfig, seed: int, blocks: int) -> Mapping[str, obj
     return {
         "schema": SCHEMA,
         "campaign": CAMPAIGN,
+        "createdAtUtc": _utc_now(),
         "stateEvalCommit": stateeval_commit,
         "boundary": run_boundary(config),
         "arms": {
@@ -258,6 +393,7 @@ def _validate_manifest(
 ) -> tuple[Mapping[str, object], ...]:
     if manifest.get("schema") != SCHEMA or manifest.get("campaign") != CAMPAIGN:
         raise CampaignStateError("Campaign manifest schema is invalid")
+    _require_utc_timestamp(manifest.get("createdAtUtc"), "manifest createdAtUtc")
     if manifest.get("task") != _task_json(HOSTILE_TASK):
         raise CampaignStateError("Campaign manifest task is invalid")
     if manifest.get("activationControls") != {
@@ -316,15 +452,41 @@ def _validate_identity(
     slot: Mapping[str, object],
     attempt_number: int,
     artifact: str,
+    activation_epoch: int,
 ) -> None:
     expected = {
         "slotId": slot["slotId"],
         "attempt": attempt_number,
         "taskId": slot["taskId"],
         "arm": slot["arm"],
+        "activationEpoch": activation_epoch,
     }
     if any(value.get(key) != expected_value for key, expected_value in expected.items()):
         raise CampaignStateError(f"{artifact} identity does not match the plan")
+
+
+def _require_passed_activation_epoch(output: Path, value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise CampaignStateError("Attempt activationEpoch is invalid")
+    epoch_root = output / "activations" / f"epoch-{value:04d}"
+    started = _read_json(epoch_root / "started.json")
+    terminal = _read_json(epoch_root / "terminal.json")
+    if (
+        started.get("schema") != SCHEMA
+        or started.get("epoch") != value
+        or started.get("status") != "started"
+        or terminal.get("schema") != SCHEMA
+        or terminal.get("epoch") != value
+        or terminal.get("status") != "passed"
+    ):
+        raise CampaignStateError("Attempt activationEpoch did not pass")
+    _require_utc_timestamp(
+        started.get("startedAtUtc"), "activation startedAtUtc"
+    )
+    _require_utc_timestamp(
+        terminal.get("finishedAtUtc"), "activation finishedAtUtc"
+    )
+    return value
 
 
 def _validate_terminal(value: Mapping[str, object]) -> None:
@@ -406,7 +568,19 @@ def _scan_slots(
                         f"Attempt has no append-only started record: {attempt_path}"
                     )
                 started = _read_json(started_path)
-                _validate_identity(started, slot, number, "started.json")
+                activation_epoch = _require_passed_activation_epoch(
+                    output, started.get("activationEpoch")
+                )
+                _validate_identity(
+                    started,
+                    slot,
+                    number,
+                    "started.json",
+                    activation_epoch,
+                )
+                _require_utc_timestamp(
+                    started.get("startedAtUtc"), "attempt startedAtUtc"
+                )
                 interrupted = (
                     _read_json(attempt_path / "interrupted.json")
                     if (attempt_path / "interrupted.json").is_file()
@@ -418,9 +592,29 @@ def _scan_slots(
                     else None
                 )
                 if interrupted is not None:
-                    _validate_identity(interrupted, slot, number, "interrupted.json")
+                    _validate_identity(
+                        interrupted,
+                        slot,
+                        number,
+                        "interrupted.json",
+                        activation_epoch,
+                    )
+                    _require_utc_timestamp(
+                        interrupted.get("interruptedAtUtc"),
+                        "attempt interruptedAtUtc",
+                    )
                 if terminal is not None:
-                    _validate_identity(terminal, slot, number, "terminal.json")
+                    _validate_identity(
+                        terminal,
+                        slot,
+                        number,
+                        "terminal.json",
+                        activation_epoch,
+                    )
+                    _require_utc_timestamp(
+                        terminal.get("finishedAtUtc"),
+                        "attempt finishedAtUtc",
+                    )
                     _validate_terminal(terminal)
                 if interrupted is not None and terminal is not None:
                     raise CampaignStateError(
@@ -466,6 +660,8 @@ def _interrupt_dangling_attempts(
                     "attempt": attempt.number,
                     "taskId": state.slot["taskId"],
                     "arm": state.slot["arm"],
+                    "activationEpoch": attempt.started["activationEpoch"],
+                    "interruptedAtUtc": _utc_now(),
                     "reason": "prior invocation ended before a terminal record",
                 },
             )
@@ -509,7 +705,11 @@ def _start_attempt(
     output: Path,
     schedule: tuple[Mapping[str, object], ...],
     slot_id: str,
+    activation_epoch: int,
 ) -> Path:
+    activation_epoch = _require_passed_activation_epoch(
+        output, activation_epoch
+    )
     slot = _slot_by_id(schedule, slot_id)
     state = next(
         state
@@ -537,6 +737,8 @@ def _start_attempt(
                 "attempt": number,
                 "taskId": slot["taskId"],
                 "arm": slot["arm"],
+                "activationEpoch": activation_epoch,
+                "startedAtUtc": _utc_now(),
                 "blockIndex": slot["blockIndex"],
                 "position": slot["position"],
             },
@@ -573,14 +775,22 @@ def _write_slot_terminal(
     if attempt.interrupted is not None:
         raise CampaignStateError("Interrupted attempt cannot become terminal")
     complete = {
+        **terminal,
         "schema": SCHEMA,
         "slotId": slot_id,
         "attempt": attempt.number,
         "taskId": slot["taskId"],
         "arm": slot["arm"],
-        **terminal,
+        "activationEpoch": attempt.started["activationEpoch"],
+        "finishedAtUtc": _utc_now(),
     }
-    _validate_identity(complete, slot, attempt.number, "terminal.json")
+    _validate_identity(
+        complete,
+        slot,
+        attempt.number,
+        "terminal.json",
+        int(attempt.started["activationEpoch"]),
+    )
     _validate_terminal(complete)
     _atomic_create_json(attempt_path / "terminal.json", complete)
 
@@ -877,7 +1087,12 @@ def _next_epoch(output: Path) -> tuple[int, Path]:
     epoch.mkdir(exist_ok=False)
     _atomic_create_json(
         epoch / "started.json",
-        {"schema": SCHEMA, "epoch": number, "status": "started"},
+        {
+            "schema": SCHEMA,
+            "epoch": number,
+            "status": "started",
+            "startedAtUtc": _utc_now(),
+        },
     )
     return number, epoch
 
@@ -927,6 +1142,7 @@ def _run_activation_epoch(
                 "schema": SCHEMA,
                 "epoch": number,
                 "status": "passed",
+                "finishedAtUtc": _utc_now(),
                 "ownershipOffProcess": {
                     "launchId": config.ownership_off_launch_id,
                     "pid": config.ownership_off_pid,
@@ -949,6 +1165,7 @@ def _run_activation_epoch(
                 "schema": SCHEMA,
                 "epoch": number,
                 "status": "failed",
+                "finishedAtUtc": _utc_now(),
                 "phase": phase,
                 "error": _error_json(error),
             },
@@ -1074,11 +1291,25 @@ def _activation_summary(output: Path) -> Mapping[str, object]:
     if not root.exists():
         return {"epochs": 0, "passed": 0, "failed": 0, "incomplete": 0}
     epochs = sorted(root.iterdir())
+    if [epoch.name for epoch in epochs] != [
+        f"epoch-{number:04d}" for number in range(1, len(epochs) + 1)
+    ]:
+        raise CampaignStateError("Activation epoch artifacts are invalid")
     passed = 0
     failed = 0
     incomplete = 0
     latest_status = "incomplete"
-    for epoch in epochs:
+    for number, epoch in enumerate(epochs, start=1):
+        started = _read_json(epoch / "started.json")
+        if (
+            started.get("schema") != SCHEMA
+            or started.get("epoch") != number
+            or started.get("status") != "started"
+        ):
+            raise CampaignStateError("Activation started record is invalid")
+        _require_utc_timestamp(
+            started.get("startedAtUtc"), "activation startedAtUtc"
+        )
         terminal_path = epoch / "terminal.json"
         if not terminal_path.is_file():
             incomplete += 1
@@ -1086,6 +1317,11 @@ def _activation_summary(output: Path) -> Mapping[str, object]:
             continue
         terminal = _read_json(terminal_path)
         status = terminal.get("status")
+        if terminal.get("schema") != SCHEMA or terminal.get("epoch") != number:
+            raise CampaignStateError("Activation terminal identity is invalid")
+        _require_utc_timestamp(
+            terminal.get("finishedAtUtc"), "activation finishedAtUtc"
+        )
         if status == "passed":
             passed += 1
         elif status == "failed":
@@ -1103,6 +1339,57 @@ def _activation_summary(output: Path) -> Mapping[str, object]:
         summary["latestEpoch"] = epochs[-1].relative_to(output).as_posix()
         summary["latestStatus"] = latest_status
     return summary
+
+
+def _time_window(
+    output: Path, states: tuple[_SlotState, ...]
+) -> Mapping[str, object]:
+    starts: list[str] = []
+    terminals: list[str] = []
+    activation_root = output / "activations"
+    if activation_root.exists():
+        for epoch in sorted(activation_root.iterdir()):
+            started = _read_json(epoch / "started.json")
+            starts.append(
+                _require_utc_timestamp(
+                    started.get("startedAtUtc"), "activation startedAtUtc"
+                )
+            )
+            terminal_path = epoch / "terminal.json"
+            if terminal_path.is_file():
+                terminal = _read_json(terminal_path)
+                terminals.append(
+                    _require_utc_timestamp(
+                        terminal.get("finishedAtUtc"),
+                        "activation finishedAtUtc",
+                    )
+                )
+    for state in states:
+        for attempt in state.attempts:
+            starts.append(
+                _require_utc_timestamp(
+                    attempt.started.get("startedAtUtc"),
+                    "attempt startedAtUtc",
+                )
+            )
+            if attempt.interrupted is not None:
+                terminals.append(
+                    _require_utc_timestamp(
+                        attempt.interrupted.get("interruptedAtUtc"),
+                        "attempt interruptedAtUtc",
+                    )
+                )
+            if attempt.terminal is not None:
+                terminals.append(
+                    _require_utc_timestamp(
+                        attempt.terminal.get("finishedAtUtc"),
+                        "attempt finishedAtUtc",
+                    )
+                )
+    return {
+        "firstStartedAtUtc": min(starts) if starts else None,
+        "lastTerminalAtUtc": max(terminals) if terminals else None,
+    }
 
 
 def _summary(
@@ -1178,6 +1465,7 @@ def _summary(
     summary: dict[str, object] = {
         "schema": SCHEMA,
         "status": status,
+        "timeWindow": _time_window(output, states),
         "counts": {
             "plannedSlots": len(states),
             "terminalSlots": len(terminal_states),
@@ -1227,7 +1515,7 @@ def _write_summary(
     return summary
 
 
-def run_ownership_campaign(
+def _run_ownership_campaign_locked(
     config: RuntimeConfig,
     output: Path,
     *,
@@ -1236,19 +1524,13 @@ def run_ownership_campaign(
     resume: bool = False,
 ) -> Mapping[str, object]:
     if resume:
-        if seed is not None or blocks is not None:
-            raise ValueError("resume cannot include seed or blocks")
-        if not output.is_dir():
-            raise CampaignStateError("Resume output does not exist")
         _manifest_value, schedule, manifest_bytes = _load_manifest(output, config)
         if (output / "manifest.json").read_bytes() != manifest_bytes:
             raise CampaignStateError("Campaign manifest changed while being read")
         _repair_unpublished_attempts(output, schedule)
         _interrupt_dangling_attempts(output, schedule)
     else:
-        if seed is None or blocks is None:
-            raise ValueError("fresh campaign requires seed and blocks")
-        output.mkdir(parents=True, exist_ok=False)
+        assert seed is not None and blocks is not None
         manifest_value = _manifest(config, seed, blocks)
         _atomic_create_json(output / "manifest.json", manifest_value)
         schedule = _schedule(manifest_value)
@@ -1267,13 +1549,38 @@ def run_ownership_campaign(
         if state.terminal is not None:
             continue
         slot_id = str(state.slot["slotId"])
-        attempt_path = _start_attempt(output, schedule, slot_id)
+        attempt_path = _start_attempt(
+            output, schedule, slot_id, epoch_number
+        )
         _write_summary(output, schedule)
         measured = _run_slot(config, output, schedule, state.slot, attempt_path)
         summary = _write_summary(output, schedule)
         if not measured:
             return summary
     return _write_summary(output, schedule)
+
+
+def run_ownership_campaign(
+    config: RuntimeConfig,
+    output: Path,
+    *,
+    seed: int | None = None,
+    blocks: int | None = None,
+    resume: bool = False,
+) -> Mapping[str, object]:
+    if resume:
+        if seed is not None or blocks is not None:
+            raise ValueError("resume cannot include seed or blocks")
+    elif seed is None or blocks is None:
+        raise ValueError("fresh campaign requires seed and blocks")
+    with _campaign_lock(output, resume=resume):
+        return _run_ownership_campaign_locked(
+            config,
+            output,
+            seed=seed,
+            blocks=blocks,
+            resume=resume,
+        )
 
 
 def main() -> None:
