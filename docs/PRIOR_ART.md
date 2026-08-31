@@ -1,6 +1,6 @@
 # Prior art
 
-Last checked: 2026-08-29.
+Last checked: 2026-09-01.
 
 Agent evaluation turns over in months — the tau line went from tau-bench to tau3-bench in about
 eighteen — so a stale version of this file is worse than none. Two rules keep it honest:
@@ -14,6 +14,10 @@ eighteen — so a stale version of this file is worse than none. Two rules keep 
 Keep entries to three lines. This is a map of the neighbourhood, not a literature review.
 
 ## Final-state evaluation
+
+**Microsoft STATE-Bench** — read (official README and Microsoft launch post)
+Its 450 tasks span three enterprise domains with task-local databases, domain tools, and simulated users; state-mutating tasks use deterministic final-state assertions, and a separate Agent Learning Track evaluates memory, skills, or prompt optimization.
+Official README · https://github.com/microsoft/STATE-Bench · Microsoft launch post · https://opensource.microsoft.com/blog/2026/05/19/introducing-state-bench-a-benchmark-for-ai-agent-memory/
 
 **tau-bench** — read (methods, construction, and evaluation; arXiv v1)
 Synthetic retail/airline JSON databases use deterministic Python APIs; reward combines exact final-state equality, required-response substrings, and repeated-trial pass^k.
