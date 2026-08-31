@@ -1,7 +1,14 @@
 # StateEval
 
-StateEval measures whether an agent leaves authoritative business state correct. Its first
-real-model finding is a **commerce-side resource ownership ablation** against CityBuddy.
+[![check](https://github.com/ChanTso/state-eval/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/ChanTso/state-eval/actions/workflows/check.yml)
+
+StateEval is a focused authorization-ablation study against CityBuddy. It asks whether an agent
+leaves CityBuddy's authoritative business state correct, with outcomes judged from final state by
+an independent read-only MySQL grader. It is not a general benchmark framework.
+
+This repository is unrelated to Microsoft’s [STATE-Bench](https://github.com/microsoft/STATE-Bench), a 450-task enterprise and agent-memory benchmark; StateEval is intentionally a focused CityBuddy authorization-ablation study, not a general benchmark framework.
+
+Its first real-model finding is a **commerce-side resource ownership ablation** against CityBuddy.
 [Evidence and raw artifacts](results/milestone-2/summary.json)
 
 ## 1. Which invariant is protected?
@@ -39,6 +46,10 @@ fixture topology and grader were otherwise identical.
 An independent read-only MySQL grader queries CityBuddy's authoritative final business state.
 Transcripts and `support_event` rows are diagnostic evidence for attempts and activation; they do
 not grade the outcome. CityBuddy's evaluation state and audit endpoints are not oracles.
+
+Final-state database grading and component ablation are established methods, not methodological
+novelties. [Prior art and the scope boundary](docs/PRIOR_ART.md) records the closest comparisons.
+StateEval's empirical distinction is CityBuddy's production-shaped OBO/resource-ownership path.
 
 ## 5. What happened, and what is not claimed?
 
