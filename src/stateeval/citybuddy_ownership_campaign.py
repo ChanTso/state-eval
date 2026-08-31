@@ -48,6 +48,7 @@ ARM_MODES: Mapping[str, Literal["ownership_on", "ownership_off"]] = {
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
 _ATTEMPT_NAME = re.compile(r"attempt-(\d{4})")
 _EPOCH_NAME = re.compile(r"epoch-(\d{4})")
+_TEMP_EPOCH_NAME = re.compile(r"\.epoch-(\d{4})\..+")
 _UTC_RFC3339 = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z"
 )
@@ -1070,21 +1071,83 @@ def _map_control_artifacts(
     return mapped
 
 
-def _next_epoch(output: Path) -> tuple[int, Path]:
+def _repair_unpublished_epochs(output: Path) -> tuple[int, Path] | None:
     root = output / "activations"
-    root.mkdir(parents=True, exist_ok=True)
-    numbers: list[int] = []
-    for child in root.iterdir():
-        match = _EPOCH_NAME.fullmatch(child.name)
-        if not child.is_dir() or match is None:
-            raise CampaignStateError(f"Invalid activation epoch artifact: {child.name}")
-        numbers.append(int(match.group(1)))
-    numbers.sort()
+    if not root.exists():
+        return None
+    if root.is_symlink() or not root.is_dir():
+        raise CampaignStateError("Activation artifact root is invalid")
+    published: list[tuple[int, Path]] = []
+    unpublished: list[tuple[Path, tuple[Path, ...]]] = []
+    for child in tuple(root.iterdir()):
+        final_match = _EPOCH_NAME.fullmatch(child.name)
+        temporary_match = _TEMP_EPOCH_NAME.fullmatch(child.name)
+        if final_match is not None:
+            if child.is_symlink() or not child.is_dir():
+                raise CampaignStateError(
+                    f"Invalid activation epoch artifact: {child.name}"
+                )
+            published.append((int(final_match.group(1)), child))
+            continue
+        if temporary_match is None:
+            raise CampaignStateError(
+                f"Invalid activation epoch artifact: {child.name}"
+            )
+        if child.is_symlink() or not child.is_dir():
+            raise CampaignStateError(
+                f"Invalid unpublished activation epoch artifact: {child}"
+            )
+        contents = tuple(child.iterdir())
+        if any(
+            artifact.is_symlink()
+            or not artifact.is_file()
+            or (
+                artifact.name != "started.json"
+                and not artifact.name.startswith(".started.json.")
+            )
+            for artifact in contents
+        ):
+            raise CampaignStateError(
+                f"Unpublished activation epoch contains an unknown artifact: {child}"
+            )
+        unpublished.append((child, contents))
+
+    published.sort()
+    numbers = [number for number, _path in published]
     if numbers != list(range(1, len(numbers) + 1)):
         raise CampaignStateError("Activation epoch numbering has a gap")
-    number = len(numbers) + 1
-    epoch = root / f"epoch-{number:04d}"
-    epoch.mkdir(exist_ok=False)
+    missing = [
+        (number, path)
+        for number, path in published
+        if not (path / "started.json").is_file()
+    ]
+    if missing and (len(missing) != 1 or missing[0] != published[-1]):
+        raise CampaignStateError("Published activation epoch has no started record")
+    legacy: tuple[int, Path, tuple[Path, ...]] | None = None
+    if missing:
+        number, epoch = missing[0]
+        contents = tuple(epoch.iterdir())
+        if any(
+            artifact.is_symlink()
+            or not artifact.is_file()
+            or not artifact.name.startswith(".started.json.")
+            for artifact in contents
+        ):
+            raise CampaignStateError(
+                f"Published activation epoch has no started record: {epoch}"
+            )
+        legacy = number, epoch, contents
+
+    for temporary, contents in unpublished:
+        for artifact in contents:
+            artifact.unlink()
+        temporary.rmdir()
+        _fsync_parent(temporary)
+    if legacy is None:
+        return None
+    number, epoch, contents = legacy
+    for artifact in contents:
+        artifact.unlink()
     _atomic_create_json(
         epoch / "started.json",
         {
@@ -1094,6 +1157,49 @@ def _next_epoch(output: Path) -> tuple[int, Path]:
             "startedAtUtc": _utc_now(),
         },
     )
+    return number, epoch
+
+
+def _next_epoch(output: Path) -> tuple[int, Path]:
+    root = output / "activations"
+    try:
+        root.mkdir(parents=True)
+        _fsync_parent(root)
+    except FileExistsError:
+        if root.is_symlink() or not root.is_dir():
+            raise CampaignStateError("Activation artifact root is invalid")
+    numbers: list[int] = []
+    for child in root.iterdir():
+        match = _EPOCH_NAME.fullmatch(child.name)
+        if child.is_symlink() or not child.is_dir() or match is None:
+            raise CampaignStateError(f"Invalid activation epoch artifact: {child.name}")
+        numbers.append(int(match.group(1)))
+    numbers.sort()
+    if numbers != list(range(1, len(numbers) + 1)):
+        raise CampaignStateError("Activation epoch numbering has a gap")
+    number = len(numbers) + 1
+    epoch = root / f"epoch-{number:04d}"
+    temporary = Path(
+        tempfile.mkdtemp(dir=root, prefix=f".epoch-{number:04d}.")
+    )
+    try:
+        _atomic_create_json(
+            temporary / "started.json",
+            {
+                "schema": SCHEMA,
+                "epoch": number,
+                "status": "started",
+                "startedAtUtc": _utc_now(),
+            },
+        )
+        os.rename(temporary, epoch)
+        _fsync_parent(epoch)
+    finally:
+        if temporary.exists():
+            for artifact in temporary.iterdir():
+                if artifact.is_file():
+                    artifact.unlink()
+            temporary.rmdir()
     return number, epoch
 
 
@@ -1523,10 +1629,12 @@ def _run_ownership_campaign_locked(
     blocks: int | None = None,
     resume: bool = False,
 ) -> Mapping[str, object]:
+    recovered_epoch: tuple[int, Path] | None = None
     if resume:
         _manifest_value, schedule, manifest_bytes = _load_manifest(output, config)
         if (output / "manifest.json").read_bytes() != manifest_bytes:
             raise CampaignStateError("Campaign manifest changed while being read")
+        recovered_epoch = _repair_unpublished_epochs(output)
         _repair_unpublished_attempts(output, schedule)
         _interrupt_dangling_attempts(output, schedule)
     else:
@@ -1539,7 +1647,10 @@ def _run_ownership_campaign_locked(
     if summary["counts"]["pendingSlots"] == 0:
         return summary
 
-    epoch_number, epoch = _next_epoch(output)
+    if recovered_epoch is None:
+        epoch_number, epoch = _next_epoch(output)
+    else:
+        epoch_number, epoch = recovered_epoch
     _write_summary(output, schedule)
     if not _run_activation_epoch(config, output, epoch_number, epoch):
         return _write_summary(output, schedule)

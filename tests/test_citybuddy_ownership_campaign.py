@@ -2136,3 +2136,260 @@ class ActivationEpochBindingTest(TestCase):
                 self.assertFalse(
                     (output / "activations" / "epoch-0002").exists()
                 )
+
+
+class ActivationEpochPublicationRecoveryTest(TestCase):
+    def test_next_epoch_publishes_only_after_started_is_complete(self) -> None:
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary) / "campaign"
+            output.mkdir()
+            rename = campaign.os.rename
+            published: list[tuple[Path, Path]] = []
+
+            def inspect_publish(source: Path, destination: Path) -> None:
+                started = json.loads((source / "started.json").read_bytes())
+                self.assertTrue(source.name.startswith(".epoch-0001."))
+                self.assertEqual("epoch-0001", destination.name)
+                self.assertEqual(1, started["epoch"])
+                self.assertEqual("started", started["status"])
+                self.assertFalse(destination.exists())
+                published.append((source, destination))
+                rename(source, destination)
+
+            with patch.object(campaign.os, "rename", side_effect=inspect_publish):
+                number, epoch = campaign._next_epoch(output)
+
+            self.assertEqual(1, number)
+            self.assertEqual([(published[0][0], epoch)], published)
+            self.assertTrue((epoch / "started.json").is_file())
+            self.assertEqual(
+                ["epoch-0001"],
+                [path.name for path in (output / "activations").iterdir()],
+            )
+
+    def test_resume_recovers_a_legacy_published_epoch_missing_started(self) -> None:
+        with TemporaryDirectory() as temporary, fixed_runtime():
+            output = Path(temporary) / "campaign"
+            _manifest, schedule = initialized_campaign(output)
+            completed_attempt = complete_slot(
+                output, schedule, schedule[0], measured_terminal()
+            )
+            first_epoch = output / "activations" / "epoch-0001"
+            preserved = {
+                path: path.read_bytes()
+                for path in (
+                    first_epoch / "started.json",
+                    first_epoch / "terminal.json",
+                    completed_attempt / "started.json",
+                    completed_attempt / "terminal.json",
+                )
+            }
+
+            legacy_epoch = output / "activations" / "epoch-0002"
+            legacy_epoch.mkdir()
+            stale_started = legacy_epoch / ".started.json.crashed"
+            stale_started.write_bytes(b'{"schema":')
+            activated: list[tuple[int, Path]] = []
+
+            def activate(
+                runtime: RuntimeConfig,
+                root: Path,
+                number: int,
+                epoch: Path,
+            ) -> bool:
+                activated.append((number, epoch))
+                return _pass_activation(runtime, root, number, epoch)
+
+            def measure_pending(
+                runtime: RuntimeConfig,
+                root: Path,
+                immutable_schedule: tuple[Mapping[str, object], ...],
+                slot: Mapping[str, object],
+                attempt: Path,
+            ) -> bool:
+                del runtime
+                campaign._write_slot_terminal(
+                    root,
+                    immutable_schedule,
+                    str(slot["slotId"]),
+                    attempt,
+                    measured_terminal(),
+                )
+                return True
+
+            with patch.object(
+                campaign, "_run_activation_epoch", side_effect=activate
+            ), patch.object(campaign, "_run_slot", side_effect=measure_pending):
+                summary = campaign.run_ownership_campaign(
+                    config(), output, resume=True
+                )
+
+            self.assertEqual([(2, legacy_epoch)], activated)
+            self.assertFalse(stale_started.exists())
+            self.assertFalse(
+                (output / "activations" / "epoch-0003").exists()
+            )
+            recovered_started = json.loads(
+                (legacy_epoch / "started.json").read_bytes()
+            )
+            recovered_terminal = json.loads(
+                (legacy_epoch / "terminal.json").read_bytes()
+            )
+            self.assertEqual(campaign.SCHEMA, recovered_started["schema"])
+            self.assertEqual(2, recovered_started["epoch"])
+            self.assertEqual("started", recovered_started["status"])
+            campaign._require_utc_timestamp(
+                recovered_started["startedAtUtc"],
+                "activation startedAtUtc",
+            )
+            self.assertEqual("passed", recovered_terminal["status"])
+            for path, original in preserved.items():
+                self.assertEqual(original, path.read_bytes())
+
+            pending_attempt = (
+                output
+                / "slots"
+                / str(schedule[1]["slotId"])
+                / "attempt-0001"
+            )
+            self.assertEqual(
+                1,
+                json.loads((completed_attempt / "started.json").read_bytes())[
+                    "activationEpoch"
+                ],
+            )
+            self.assertEqual(
+                1,
+                json.loads((completed_attempt / "terminal.json").read_bytes())[
+                    "activationEpoch"
+                ],
+            )
+            self.assertEqual(
+                2,
+                json.loads((pending_attempt / "started.json").read_bytes())[
+                    "activationEpoch"
+                ],
+            )
+            self.assertEqual(
+                2,
+                json.loads((pending_attempt / "terminal.json").read_bytes())[
+                    "activationEpoch"
+                ],
+            )
+            self.assertEqual("complete", summary["status"])
+
+    def test_resume_discards_hidden_epoch_but_preserves_published_incomplete_epoch(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary, fixed_runtime():
+            output = Path(temporary) / "campaign"
+            _manifest, schedule = initialized_campaign(output)
+            completed_attempt = complete_slot(
+                output, schedule, schedule[0], measured_terminal()
+            )
+            first_epoch = output / "activations" / "epoch-0001"
+            second_number, second_epoch = campaign._next_epoch(output)
+            self.assertEqual(2, second_number)
+            preserved = {
+                path: path.read_bytes()
+                for path in (
+                    first_epoch / "started.json",
+                    first_epoch / "terminal.json",
+                    completed_attempt / "started.json",
+                    completed_attempt / "terminal.json",
+                    second_epoch / "started.json",
+                )
+            }
+
+            hidden_epoch = output / "activations" / ".epoch-0003.crashed"
+            hidden_epoch.mkdir()
+            campaign._atomic_create_json(
+                hidden_epoch / "started.json",
+                {
+                    "schema": campaign.SCHEMA,
+                    "epoch": 3,
+                    "status": "started",
+                    "startedAtUtc": campaign._utc_now(),
+                },
+            )
+            activated: list[tuple[int, Path]] = []
+
+            def activate(
+                runtime: RuntimeConfig,
+                root: Path,
+                number: int,
+                epoch: Path,
+            ) -> bool:
+                activated.append((number, epoch))
+                return _pass_activation(runtime, root, number, epoch)
+
+            def measure_pending(
+                runtime: RuntimeConfig,
+                root: Path,
+                immutable_schedule: tuple[Mapping[str, object], ...],
+                slot: Mapping[str, object],
+                attempt: Path,
+            ) -> bool:
+                del runtime
+                campaign._write_slot_terminal(
+                    root,
+                    immutable_schedule,
+                    str(slot["slotId"]),
+                    attempt,
+                    measured_terminal(),
+                )
+                return True
+
+            with patch.object(
+                campaign, "_run_activation_epoch", side_effect=activate
+            ), patch.object(campaign, "_run_slot", side_effect=measure_pending):
+                summary = campaign.run_ownership_campaign(
+                    config(), output, resume=True
+                )
+
+            third_epoch = output / "activations" / "epoch-0003"
+            self.assertEqual([(3, third_epoch)], activated)
+            self.assertFalse(hidden_epoch.exists())
+            self.assertTrue(second_epoch.is_dir())
+            self.assertFalse((second_epoch / "terminal.json").exists())
+            for path, original in preserved.items():
+                self.assertEqual(original, path.read_bytes())
+            self.assertEqual(
+                ["epoch-0001", "epoch-0002", "epoch-0003"],
+                sorted(path.name for path in (output / "activations").iterdir()),
+            )
+
+            pending_attempt = (
+                output
+                / "slots"
+                / str(schedule[1]["slotId"])
+                / "attempt-0001"
+            )
+            self.assertEqual(
+                1,
+                json.loads((completed_attempt / "started.json").read_bytes())[
+                    "activationEpoch"
+                ],
+            )
+            self.assertEqual(
+                1,
+                json.loads((completed_attempt / "terminal.json").read_bytes())[
+                    "activationEpoch"
+                ],
+            )
+            self.assertEqual(
+                3,
+                json.loads((pending_attempt / "started.json").read_bytes())[
+                    "activationEpoch"
+                ],
+            )
+            self.assertEqual(
+                3,
+                json.loads((pending_attempt / "terminal.json").read_bytes())[
+                    "activationEpoch"
+                ],
+            )
+            self.assertEqual("complete", summary["status"])
+            self.assertEqual(3, summary["activation"]["epochs"])
+            self.assertEqual(2, summary["activation"]["passed"])
+            self.assertEqual(1, summary["activation"]["incomplete"])
