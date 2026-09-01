@@ -50,6 +50,109 @@ ARM_MODES: Mapping[str, Literal["ownership_on", "ownership_off"]] = {
 
 
 @dataclass(frozen=True)
+class CampaignRuntimeConfig(RuntimeConfig):
+    agent_workers: int
+    agent_http_client_layout: str
+    evaluation_session_propagation_enabled: bool
+    trace_export_enabled: bool
+    metrics_enabled: bool
+
+    def __post_init__(self) -> None:
+        expected: tuple[tuple[str, object, object], ...] = (
+            ("agent_workers", self.agent_workers, 1),
+            ("agent_http_client_layout", self.agent_http_client_layout, "shared"),
+            (
+                "evaluation_session_propagation_enabled",
+                self.evaluation_session_propagation_enabled,
+                True,
+            ),
+            ("trace_export_enabled", self.trace_export_enabled, False),
+            ("metrics_enabled", self.metrics_enabled, False),
+        )
+        for name, actual, required in expected:
+            if type(actual) is not type(required) or actual != required:
+                raise ValueError(
+                    f"{name} must be {str(required).lower()} for this campaign"
+                )
+
+    @classmethod
+    def from_environment(cls) -> CampaignRuntimeConfig:
+        base = RuntimeConfig.from_environment()
+
+        def required_exact(name: str, expected: str) -> str:
+            value = os.environ.get(name)
+            if value is None or value == "":
+                raise RuntimeError(
+                    f"Missing required campaign runtime value: {name}"
+                )
+            if value != expected:
+                raise RuntimeError(
+                    f"{name} must be {expected} for this campaign"
+                )
+            return value
+
+        agent_workers = required_exact("STATEEVAL_AGENT_WORKERS", "1")
+        agent_http_client_layout = required_exact(
+            "STATEEVAL_AGENT_HTTP_CLIENT_LAYOUT", "shared"
+        )
+        session_propagation = required_exact(
+            "STATEEVAL_EVALUATION_SESSION_PROPAGATION_ENABLED", "true"
+        )
+        trace_export = required_exact(
+            "STATEEVAL_TRACE_EXPORT_ENABLED", "false"
+        )
+        metrics = required_exact("STATEEVAL_METRICS_ENABLED", "false")
+        return cls(
+            **vars(base),
+            agent_workers=int(agent_workers),
+            agent_http_client_layout=agent_http_client_layout,
+            evaluation_session_propagation_enabled=(
+                session_propagation == "true"
+            ),
+            trace_export_enabled=trace_export == "true",
+            metrics_enabled=metrics == "true",
+        )
+
+
+def _campaign_agent_runtime(
+    config: CampaignRuntimeConfig,
+) -> Mapping[str, object]:
+    return {
+        "agentWorkers": config.agent_workers,
+        "agentHttpClientLayout": config.agent_http_client_layout,
+        "evaluationSessionPropagationEnabled": (
+            config.evaluation_session_propagation_enabled
+        ),
+        "traceExportEnabled": config.trace_export_enabled,
+        "metricsEnabled": config.metrics_enabled,
+    }
+
+
+def _campaign_run_boundary(
+    config: CampaignRuntimeConfig,
+) -> Mapping[str, object]:
+    boundary = dict(run_boundary(config))
+    boundary["agentRuntime"] = _campaign_agent_runtime(config)
+    return boundary
+
+
+def _require_exact_agent_runtime_boundary(
+    boundary: object, config: CampaignRuntimeConfig
+) -> None:
+    if not isinstance(boundary, dict):
+        raise CampaignStateError("Runtime boundary does not match campaign manifest")
+    actual = boundary.get("agentRuntime")
+    expected = _campaign_agent_runtime(config)
+    if not isinstance(actual, dict) or actual.keys() != expected.keys():
+        raise CampaignStateError("Runtime boundary does not match campaign manifest")
+    if any(
+        type(actual[name]) is not type(required) or actual[name] != required
+        for name, required in expected.items()
+    ):
+        raise CampaignStateError("Runtime boundary does not match campaign manifest")
+
+
+@dataclass(frozen=True)
 class _PhaseSpec:
     seed: int
     blocks: int
@@ -420,7 +523,9 @@ def _build_schedule(seed: int, blocks: int) -> list[Mapping[str, object]]:
     return schedule
 
 
-def _manifest(config: RuntimeConfig, phase: str) -> Mapping[str, object]:
+def _manifest(
+    config: CampaignRuntimeConfig, phase: str
+) -> Mapping[str, object]:
     phase, spec = _phase_spec(phase)
     stateeval_commit = _require_full_sha(_stateeval_commit(), "StateEval commit")
     _require_full_sha(config.citybuddy_commit, "CityBuddy commit")
@@ -432,7 +537,7 @@ def _manifest(config: RuntimeConfig, phase: str) -> Mapping[str, object]:
         "excludedFromFormalFinding": spec.excluded_from_formal_finding,
         "createdAtUtc": _utc_now(),
         "stateEvalCommit": stateeval_commit,
-        "boundary": run_boundary(config),
+        "boundary": _campaign_run_boundary(config),
         "arms": {
             "ownershipOn": {
                 "adapterMode": "ownership_on",
@@ -493,7 +598,9 @@ def _schedule(manifest: Mapping[str, object]) -> tuple[Mapping[str, object], ...
 
 
 def _validate_manifest(
-    manifest: Mapping[str, object], config: RuntimeConfig, phase: str
+    manifest: Mapping[str, object],
+    config: CampaignRuntimeConfig,
+    phase: str,
 ) -> tuple[Mapping[str, object], ...]:
     phase, spec = _phase_spec(phase)
     if manifest.get("schema") != SCHEMA or manifest.get("campaign") != CAMPAIGN:
@@ -532,13 +639,15 @@ def _validate_manifest(
     if manifest.get("stateEvalCommit") != current_stateeval:
         raise CampaignStateError("StateEval commit does not match campaign manifest")
     _require_full_sha(config.citybuddy_commit, "CityBuddy commit")
-    if manifest.get("boundary") != run_boundary(config):
+    manifest_boundary = manifest.get("boundary")
+    _require_exact_agent_runtime_boundary(manifest_boundary, config)
+    if manifest_boundary != _campaign_run_boundary(config):
         raise CampaignStateError("Runtime boundary does not match campaign manifest")
     return _schedule(manifest)
 
 
 def _load_manifest(
-    output: Path, config: RuntimeConfig, phase: str
+    output: Path, config: CampaignRuntimeConfig, phase: str
 ) -> tuple[Mapping[str, object], tuple[Mapping[str, object], ...], bytes]:
     manifest_path = output / "manifest.json"
     try:
@@ -933,7 +1042,7 @@ def _error_json(error: Exception) -> Mapping[str, object]:
 class _CampaignCityBuddyAdapter(CityBuddyAdapter):
     def __init__(
         self,
-        config: RuntimeConfig,
+        config: CampaignRuntimeConfig,
         artifact_root: Path,
         *,
         task: Task,
@@ -1152,7 +1261,7 @@ def _result_artifact(
 
 
 def _run_control(
-    config: RuntimeConfig,
+    config: CampaignRuntimeConfig,
     root: Path,
     mode: Literal["policy_control", "mutation_control"],
     task: Task,
@@ -1344,7 +1453,7 @@ def _next_epoch(output: Path) -> tuple[int, Path]:
 
 
 def _run_activation_epoch(
-    config: RuntimeConfig, output: Path, number: int, epoch: Path
+    config: CampaignRuntimeConfig, output: Path, number: int, epoch: Path
 ) -> bool:
     phase = "off_process_before_controls"
     try:
@@ -1420,7 +1529,7 @@ def _run_activation_epoch(
 
 
 def _run_slot(
-    config: RuntimeConfig,
+    config: CampaignRuntimeConfig,
     output: Path,
     schedule: tuple[Mapping[str, object], ...],
     slot: Mapping[str, object],
@@ -1877,7 +1986,7 @@ def _write_summary(
 
 
 def _run_ownership_campaign_locked(
-    config: RuntimeConfig,
+    config: CampaignRuntimeConfig,
     output: Path,
     *,
     phase: str,
@@ -1927,7 +2036,7 @@ def _run_ownership_campaign_locked(
 
 
 def run_ownership_campaign(
-    config: RuntimeConfig,
+    config: CampaignRuntimeConfig,
     output: Path,
     *,
     phase: str,
@@ -1951,8 +2060,14 @@ def main() -> None:
     arguments = parser.parse_args()
 
     try:
+        config = CampaignRuntimeConfig.from_environment()
+    except RuntimeError as error:
+        print(f"campaign_error={error}", file=os.sys.stderr)
+        raise SystemExit(2) from error
+
+    try:
         summary = run_ownership_campaign(
-            RuntimeConfig.from_environment(),
+            config,
             arguments.output,
             phase=arguments.phase,
             resume=arguments.resume,

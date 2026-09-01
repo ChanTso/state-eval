@@ -50,7 +50,7 @@ TRACE_IDS = (
 )
 
 
-def config(**overrides: object) -> RuntimeConfig:
+def config(**overrides: object) -> campaign.CampaignRuntimeConfig:
     values: dict[str, object] = {
         "auth_base_url": "http://auth.invalid",
         "commerce_on_base_url": "http://commerce-on.invalid",
@@ -71,9 +71,45 @@ def config(**overrides: object) -> RuntimeConfig:
         "model_timeout_seconds": 30.0,
         "ownership_off_launch_id": "launch-fixed",
         "ownership_off_pid": "12345",
+        "agent_workers": 1,
+        "agent_http_client_layout": "shared",
+        "evaluation_session_propagation_enabled": True,
+        "trace_export_enabled": False,
+        "metrics_enabled": False,
     }
     values.update(overrides)
-    return RuntimeConfig(**values)  # type: ignore[arg-type]
+    return campaign.CampaignRuntimeConfig(**values)  # type: ignore[arg-type]
+
+
+def runtime_environment(**overrides: str) -> dict[str, str]:
+    values = {
+        "STATEEVAL_AUTH_BASE_URL": "http://auth.invalid",
+        "STATEEVAL_COMMERCE_ON_BASE_URL": "http://commerce-on.invalid",
+        "STATEEVAL_COMMERCE_OFF_BASE_URL": "http://commerce-off.invalid",
+        "STATEEVAL_AGENT_ON_BASE_URL": "http://agent-on.invalid",
+        "STATEEVAL_AGENT_OFF_BASE_URL": "http://agent-off.invalid",
+        "STATEEVAL_CONTROL_AGENT_BASE_URL": "http://agent-control.invalid",
+        "STATEEVAL_MANAGEMENT_PASSWORD": "synthetic",
+        "STATEEVAL_EVALUATION_CLIENT_PASSWORD": "synthetic",
+        "STATEEVAL_MYSQL_CONTAINER": "stateeval-test-mysql",
+        "STATEEVAL_MYSQL_USER": "grader",
+        "STATEEVAL_MYSQL_PASSWORD": "synthetic",
+        "STATEEVAL_MOCK_PAYMENT_KEY": "key",
+        "STATEEVAL_MOCK_PAYMENT_SECRET": "secret",
+        "STATEEVAL_CITYBUDDY_COMMIT": CITYBUDDY_SHA,
+        "STATEEVAL_MODEL_NAME": "gpt-5.4",
+        "STATEEVAL_MODEL_TEMPERATURE": "0",
+        "STATEEVAL_MODEL_TIMEOUT_SECONDS": "30",
+        "STATEEVAL_OWNERSHIP_OFF_LAUNCH_ID": "launch-fixed",
+        "STATEEVAL_OWNERSHIP_OFF_PID": "12345",
+        "STATEEVAL_AGENT_WORKERS": "1",
+        "STATEEVAL_AGENT_HTTP_CLIENT_LAYOUT": "shared",
+        "STATEEVAL_EVALUATION_SESSION_PROPAGATION_ENABLED": "true",
+        "STATEEVAL_TRACE_EXPORT_ENABLED": "false",
+        "STATEEVAL_METRICS_ENABLED": "false",
+    }
+    values.update(overrides)
+    return values
 
 
 def boundary(runtime: RuntimeConfig, *, marker: str = "fixed") -> Mapping[str, object]:
@@ -464,6 +500,76 @@ def _pass_activation(
     return True
 
 
+class CampaignRuntimeConfigTest(TestCase):
+    def test_direct_config_requires_the_closed_agent_runtime_boundary(self) -> None:
+        runtime = config()
+
+        self.assertEqual(1, runtime.agent_workers)
+        self.assertEqual("shared", runtime.agent_http_client_layout)
+        self.assertIs(True, runtime.evaluation_session_propagation_enabled)
+        self.assertIs(False, runtime.trace_export_enabled)
+        self.assertIs(False, runtime.metrics_enabled)
+
+        invalid = {
+            "agent_workers": 2,
+            "agent_http_client_layout": "per-authority",
+            "evaluation_session_propagation_enabled": False,
+            "trace_export_enabled": True,
+            "metrics_enabled": True,
+        }
+        for field, value in invalid.items():
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, field
+            ):
+                config(**{field: value})
+
+    def test_from_environment_requires_and_parses_all_five_exact_values(
+        self,
+    ) -> None:
+        with patch.dict("os.environ", runtime_environment(), clear=True):
+            runtime = campaign.CampaignRuntimeConfig.from_environment()
+
+        self.assertEqual(1, runtime.agent_workers)
+        self.assertEqual("shared", runtime.agent_http_client_layout)
+        self.assertIs(True, runtime.evaluation_session_propagation_enabled)
+        self.assertIs(False, runtime.trace_export_enabled)
+        self.assertIs(False, runtime.metrics_enabled)
+
+    def test_from_environment_has_no_agent_runtime_defaults(self) -> None:
+        names = (
+            "STATEEVAL_AGENT_WORKERS",
+            "STATEEVAL_AGENT_HTTP_CLIENT_LAYOUT",
+            "STATEEVAL_EVALUATION_SESSION_PROPAGATION_ENABLED",
+            "STATEEVAL_TRACE_EXPORT_ENABLED",
+            "STATEEVAL_METRICS_ENABLED",
+        )
+        for name in names:
+            environment = runtime_environment()
+            del environment[name]
+            with self.subTest(name=name), patch.dict(
+                "os.environ", environment, clear=True
+            ), self.assertRaisesRegex(RuntimeError, name):
+                campaign.CampaignRuntimeConfig.from_environment()
+
+    def test_from_environment_rejects_every_nonexact_agent_runtime_value(
+        self,
+    ) -> None:
+        invalid = {
+            "STATEEVAL_AGENT_WORKERS": "2",
+            "STATEEVAL_AGENT_HTTP_CLIENT_LAYOUT": "per-authority",
+            "STATEEVAL_EVALUATION_SESSION_PROPAGATION_ENABLED": "false",
+            "STATEEVAL_TRACE_EXPORT_ENABLED": "true",
+            "STATEEVAL_METRICS_ENABLED": "true",
+        }
+        for name, value in invalid.items():
+            with self.subTest(name=name), patch.dict(
+                "os.environ",
+                runtime_environment(**{name: value}),
+                clear=True,
+            ), self.assertRaisesRegex(RuntimeError, name):
+                campaign.CampaignRuntimeConfig.from_environment()
+
+
 class ScheduleAndManifestTest(TestCase):
     def test_schedule_is_deterministic_balanced_by_block_and_has_unique_ids(self) -> None:
         first = campaign._build_schedule(9182, 20)
@@ -559,6 +665,16 @@ class ScheduleAndManifestTest(TestCase):
             self.assertEqual(STATEEVAL_SHA, manifest["stateEvalCommit"])
             self.assertEqual(
                 CITYBUDDY_SHA, manifest["boundary"]["citybuddyCommit"]
+            )
+            self.assertEqual(
+                {
+                    "agentWorkers": 1,
+                    "agentHttpClientLayout": "shared",
+                    "evaluationSessionPropagationEnabled": True,
+                    "traceExportEnabled": False,
+                    "metricsEnabled": False,
+                },
+                manifest["boundary"]["agentRuntime"],
             )
             self.assertEqual(
                 [campaign._task_json(task) for task in campaign.OWNERSHIP_TASKS],
@@ -686,6 +802,49 @@ class ScheduleAndManifestTest(TestCase):
                 campaign.run_ownership_campaign(
                     config(), boundary_output, phase=TEST_PHASE, resume=True
                 )
+
+    def test_resume_rejects_each_agent_runtime_boundary_drift_before_callbacks(
+        self,
+    ) -> None:
+        drifted = (
+            ("workers-value", "agentWorkers", 2),
+            ("workers-type", "agentWorkers", True),
+            ("layout", "agentHttpClientLayout", "per-authority"),
+            (
+                "session-value",
+                "evaluationSessionPropagationEnabled",
+                False,
+            ),
+            ("session-type", "evaluationSessionPropagationEnabled", 1),
+            ("trace-value", "traceExportEnabled", True),
+            ("trace-type", "traceExportEnabled", 0),
+            ("metrics-value", "metricsEnabled", True),
+            ("metrics-type", "metricsEnabled", 0),
+        )
+        with TemporaryDirectory() as temporary, fixed_runtime():
+            root = Path(temporary)
+            for label, field, value in drifted:
+                with self.subTest(label=label):
+                    output = root / label
+                    initialized_campaign(output)
+                    manifest_path = output / "manifest.json"
+                    manifest = json.loads(manifest_path.read_bytes())
+                    manifest["boundary"]["agentRuntime"][field] = value
+                    manifest_path.write_bytes(campaign._json_bytes(manifest))
+
+                    with patch.object(
+                        campaign, "_run_activation_epoch"
+                    ) as activation, patch.object(
+                        campaign, "_run_slot"
+                    ) as run_slot, self.assertRaisesRegex(
+                        campaign.CampaignStateError, "Runtime boundary"
+                    ):
+                        campaign.run_ownership_campaign(
+                            config(), output, phase=TEST_PHASE, resume=True
+                        )
+
+                    activation.assert_not_called()
+                    run_slot.assert_not_called()
 
     def test_resume_rejects_phase_and_catalog_mismatches(self) -> None:
         with TemporaryDirectory() as temporary, fixed_runtime():
