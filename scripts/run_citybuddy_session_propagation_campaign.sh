@@ -719,7 +719,7 @@ stateeval_evaluation_client_password="$(openssl rand -hex 24)"
 stateeval_agent_service_password="$(openssl rand -hex 24)"
 stateeval_management_password="$(openssl rand -hex 24)"
 stateeval_grader_password="$(openssl rand -hex 24)"
-stateeval_mock_payment_key="stateeval-session-propagation-calibration-$(openssl rand -hex 12)"
+stateeval_mock_payment_key="stateeval-session-propagation-$(openssl rand -hex 12)"
 stateeval_mock_payment_secret="$(openssl rand -hex 32)"
 
 stateeval_commerce_service_hash="$(
