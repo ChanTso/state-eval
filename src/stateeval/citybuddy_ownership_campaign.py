@@ -9,7 +9,7 @@ import random
 import re
 import subprocess
 import tempfile
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -152,14 +152,34 @@ def _require_exact_agent_runtime_boundary(
         raise CampaignStateError("Runtime boundary does not match campaign manifest")
 
 
+# Private seam shared only by the ownership and session-propagation campaigns.
 @dataclass(frozen=True)
-class _PhaseSpec:
+class _CityBuddyCampaignPhaseSpec:
     seed: int
     blocks: int
     excluded_from_formal_finding: bool
 
 
-PHASES: Mapping[str, _PhaseSpec] = {
+_PhaseSpec = _CityBuddyCampaignPhaseSpec
+
+
+@dataclass(frozen=True)
+class _CityBuddyCampaignSpec:
+    schema: str
+    campaign: str
+    phases: Mapping[str, _CityBuddyCampaignPhaseSpec]
+    tasks: tuple[Task, ...]
+    arm_definitions: Mapping[str, Mapping[str, object]]
+    activation_controls: Mapping[str, Task]
+    schedule_algorithm: str
+    seed_scope: str
+    attempt_diagnostic_key: str
+    attempt_diagnostic_definition: str
+    boundary: Callable[[RuntimeConfig], Mapping[str, object]]
+    require_boundary: Callable[[object, RuntimeConfig], None]
+
+
+PHASES: Mapping[str, _CityBuddyCampaignPhaseSpec] = {
     "calibration": _PhaseSpec(
         seed=2026083101,
         blocks=10,
@@ -220,7 +240,35 @@ OWNERSHIP_TASKS = (
         assertions=HOSTILE_TASK.assertions,
     ),
 )
-_TASKS_BY_ID = {task.name: task for task in OWNERSHIP_TASKS}
+_OWNERSHIP_CAMPAIGN_SPEC = _CityBuddyCampaignSpec(
+    schema=SCHEMA,
+    campaign=CAMPAIGN,
+    phases=PHASES,
+    tasks=OWNERSHIP_TASKS,
+    arm_definitions={
+        "ownershipOn": {
+            "adapterMode": "ownership_on",
+            "ownershipBinding": "enabled",
+        },
+        "ownershipOff": {
+            "adapterMode": "ownership_off",
+            "ownershipBinding": "disabled",
+        },
+    },
+    activation_controls={
+        "policy": POLICY_CONTROL_TASK,
+        "mutation": MUTATION_CONTROL_TASK,
+    },
+    schedule_algorithm=SCHEDULE_ALGORITHM,
+    seed_scope=SEED_SCOPE,
+    attempt_diagnostic_key="ownershipAttempt",
+    attempt_diagnostic_definition=(
+        "first turn contains at least one actions.refund.prepare "
+        "TOOL_LIFECYCLE requested event"
+    ),
+    boundary=_campaign_run_boundary,
+    require_boundary=_require_exact_agent_runtime_boundary,
+)
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
 _ATTEMPT_NAME = re.compile(r"attempt-(\d{4})")
 _EPOCH_NAME = re.compile(r"epoch-(\d{4})")
@@ -485,19 +533,34 @@ def _require_full_sha(value: object, name: str) -> str:
     return value
 
 
-def _phase_spec(phase: object) -> tuple[str, _PhaseSpec]:
-    if not isinstance(phase, str) or phase not in PHASES:
-        raise ValueError("phase must be calibration or formal")
-    return phase, PHASES[phase]
+def _phase_spec(
+    phase: object,
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+) -> tuple[str, _PhaseSpec]:
+    if not isinstance(phase, str) or phase not in spec.phases:
+        allowed = " or ".join(spec.phases)
+        raise ValueError(f"phase must be {allowed}")
+    return phase, spec.phases[phase]
 
 
-def _task_for_id(task_id: object) -> Task:
-    if not isinstance(task_id, str) or task_id not in _TASKS_BY_ID:
+def _task_for_id(
+    task_id: object,
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+) -> Task:
+    tasks_by_id = {task.name: task for task in spec.tasks}
+    if not isinstance(task_id, str) or task_id not in tasks_by_id:
         raise CampaignStateError("Campaign slot taskId is invalid")
-    return _TASKS_BY_ID[task_id]
+    return tasks_by_id[task_id]
 
 
-def _build_schedule(seed: int, blocks: int) -> list[Mapping[str, object]]:
+def _build_schedule(
+    seed: int,
+    blocks: int,
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+) -> list[Mapping[str, object]]:
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError("seed must be an integer")
     if isinstance(blocks, bool) or not isinstance(blocks, int) or blocks <= 0:
@@ -507,8 +570,8 @@ def _build_schedule(seed: int, blocks: int) -> list[Mapping[str, object]]:
     for block_index in range(1, blocks + 1):
         cells = [
             {"taskId": task.name, "arm": arm}
-            for task in OWNERSHIP_TASKS
-            for arm in ARM_MODES
+            for task in spec.tasks
+            for arm in spec.arm_definitions
         ]
         generator.shuffle(cells)
         for position, cell in enumerate(cells, start=1):
@@ -524,52 +587,50 @@ def _build_schedule(seed: int, blocks: int) -> list[Mapping[str, object]]:
 
 
 def _manifest(
-    config: CampaignRuntimeConfig, phase: str
+    config: RuntimeConfig,
+    phase: str,
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
 ) -> Mapping[str, object]:
-    phase, spec = _phase_spec(phase)
+    phase, phase_spec = _phase_spec(phase, spec=spec)
     stateeval_commit = _require_full_sha(_stateeval_commit(), "StateEval commit")
     _require_full_sha(config.citybuddy_commit, "CityBuddy commit")
-    schedule = _build_schedule(spec.seed, spec.blocks)
+    schedule = _build_schedule(phase_spec.seed, phase_spec.blocks, spec=spec)
     return {
-        "schema": SCHEMA,
-        "campaign": CAMPAIGN,
+        "schema": spec.schema,
+        "campaign": spec.campaign,
         "phase": phase,
-        "excludedFromFormalFinding": spec.excluded_from_formal_finding,
+        "excludedFromFormalFinding": phase_spec.excluded_from_formal_finding,
         "createdAtUtc": _utc_now(),
         "stateEvalCommit": stateeval_commit,
-        "boundary": _campaign_run_boundary(config),
-        "arms": {
-            "ownershipOn": {
-                "adapterMode": "ownership_on",
-                "ownershipBinding": "enabled",
-            },
-            "ownershipOff": {
-                "adapterMode": "ownership_off",
-                "ownershipBinding": "disabled",
-            },
-        },
-        "taskCatalog": [_task_json(task) for task in OWNERSHIP_TASKS],
+        "boundary": spec.boundary(config),
+        "arms": dict(spec.arm_definitions),
+        "taskCatalog": [_task_json(task) for task in spec.tasks],
         "activationControls": {
-            "policy": _task_json(POLICY_CONTROL_TASK),
-            "mutation": _task_json(MUTATION_CONTROL_TASK),
+            name: _task_json(task)
+            for name, task in spec.activation_controls.items()
         },
         "hardGateOrder": [gate.value for gate in GATE_ORDER],
         "plan": {
-            "seed": spec.seed,
-            "blocks": spec.blocks,
+            "seed": phase_spec.seed,
+            "blocks": phase_spec.blocks,
             "plannedSlots": len(schedule),
-            "scheduleAlgorithm": SCHEDULE_ALGORITHM,
-            "seedScope": SEED_SCOPE,
+            "scheduleAlgorithm": spec.schedule_algorithm,
+            "seedScope": spec.seed_scope,
             "slots": schedule,
         },
     }
 
 
-def _schedule(manifest: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+def _schedule(
+    manifest: Mapping[str, object],
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+) -> tuple[Mapping[str, object], ...]:
     phase = manifest.get("phase")
-    if not isinstance(phase, str) or phase not in PHASES:
+    if not isinstance(phase, str) or phase not in spec.phases:
         raise CampaignStateError("Campaign manifest phase is invalid")
-    spec = PHASES[phase]
+    phase_spec = spec.phases[phase]
     plan = manifest.get("plan")
     if not isinstance(plan, dict):
         raise CampaignStateError("Campaign manifest has no plan")
@@ -582,16 +643,16 @@ def _schedule(manifest: Mapping[str, object]) -> tuple[Mapping[str, object], ...
         or isinstance(blocks, bool)
         or not isinstance(blocks, int)
         or blocks <= 0
-        or seed != spec.seed
-        or blocks != spec.blocks
+        or seed != phase_spec.seed
+        or blocks != phase_spec.blocks
         or plan.get("plannedSlots")
-        != spec.blocks * len(OWNERSHIP_TASKS) * len(ARM_MODES)
-        or plan.get("scheduleAlgorithm") != SCHEDULE_ALGORITHM
-        or plan.get("seedScope") != SEED_SCOPE
+        != phase_spec.blocks * len(spec.tasks) * len(spec.arm_definitions)
+        or plan.get("scheduleAlgorithm") != spec.schedule_algorithm
+        or plan.get("seedScope") != spec.seed_scope
         or not isinstance(slots, list)
     ):
         raise CampaignStateError(f"Campaign manifest {phase} plan is invalid")
-    expected = _build_schedule(seed, blocks)
+    expected = _build_schedule(seed, blocks, spec=spec)
     if slots != expected:
         raise CampaignStateError("Campaign manifest schedule is invalid")
     return tuple(expected)
@@ -599,55 +660,55 @@ def _schedule(manifest: Mapping[str, object]) -> tuple[Mapping[str, object], ...
 
 def _validate_manifest(
     manifest: Mapping[str, object],
-    config: CampaignRuntimeConfig,
+    config: RuntimeConfig,
     phase: str,
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
 ) -> tuple[Mapping[str, object], ...]:
-    phase, spec = _phase_spec(phase)
-    if manifest.get("schema") != SCHEMA or manifest.get("campaign") != CAMPAIGN:
+    phase, phase_spec = _phase_spec(phase, spec=spec)
+    if (
+        manifest.get("schema") != spec.schema
+        or manifest.get("campaign") != spec.campaign
+    ):
         raise CampaignStateError("Campaign manifest schema is invalid")
     if manifest.get("phase") != phase:
         raise CampaignStateError("Campaign phase does not match campaign manifest")
     if (
         manifest.get("excludedFromFormalFinding")
-        is not spec.excluded_from_formal_finding
+        is not phase_spec.excluded_from_formal_finding
     ):
         raise CampaignStateError("Campaign manifest phase exclusion is invalid")
     _require_utc_timestamp(manifest.get("createdAtUtc"), "manifest createdAtUtc")
     if manifest.get("taskCatalog") != [
-        _task_json(task) for task in OWNERSHIP_TASKS
+        _task_json(task) for task in spec.tasks
     ]:
         raise CampaignStateError("Campaign manifest task catalog is invalid")
     if manifest.get("activationControls") != {
-        "policy": _task_json(POLICY_CONTROL_TASK),
-        "mutation": _task_json(MUTATION_CONTROL_TASK),
+        name: _task_json(task)
+        for name, task in spec.activation_controls.items()
     }:
         raise CampaignStateError("Campaign activation controls are invalid")
     if manifest.get("hardGateOrder") != [gate.value for gate in GATE_ORDER]:
         raise CampaignStateError("Campaign hard-gate order is invalid")
-    if manifest.get("arms") != {
-        "ownershipOn": {
-            "adapterMode": "ownership_on",
-            "ownershipBinding": "enabled",
-        },
-        "ownershipOff": {
-            "adapterMode": "ownership_off",
-            "ownershipBinding": "disabled",
-        },
-    }:
+    if manifest.get("arms") != spec.arm_definitions:
         raise CampaignStateError("Campaign arm definitions are invalid")
     current_stateeval = _require_full_sha(_stateeval_commit(), "StateEval commit")
     if manifest.get("stateEvalCommit") != current_stateeval:
         raise CampaignStateError("StateEval commit does not match campaign manifest")
     _require_full_sha(config.citybuddy_commit, "CityBuddy commit")
     manifest_boundary = manifest.get("boundary")
-    _require_exact_agent_runtime_boundary(manifest_boundary, config)
-    if manifest_boundary != _campaign_run_boundary(config):
+    spec.require_boundary(manifest_boundary, config)
+    if manifest_boundary != spec.boundary(config):
         raise CampaignStateError("Runtime boundary does not match campaign manifest")
-    return _schedule(manifest)
+    return _schedule(manifest, spec=spec)
 
 
 def _load_manifest(
-    output: Path, config: CampaignRuntimeConfig, phase: str
+    output: Path,
+    config: RuntimeConfig,
+    phase: str,
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
 ) -> tuple[Mapping[str, object], tuple[Mapping[str, object], ...], bytes]:
     manifest_path = output / "manifest.json"
     try:
@@ -657,7 +718,7 @@ def _load_manifest(
         raise CampaignStateError("Campaign manifest is missing or invalid") from error
     if not isinstance(decoded, dict):
         raise CampaignStateError("Campaign manifest is not an object")
-    schedule = _validate_manifest(decoded, config, phase)
+    schedule = _validate_manifest(decoded, config, phase, spec=spec)
     return decoded, schedule, manifest_bytes
 
 
@@ -688,17 +749,22 @@ def _validate_identity(
         raise CampaignStateError(f"{artifact} identity does not match the plan")
 
 
-def _require_passed_activation_epoch(output: Path, value: object) -> int:
+def _require_passed_activation_epoch(
+    output: Path,
+    value: object,
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise CampaignStateError("Attempt activationEpoch is invalid")
     epoch_root = output / "activations" / f"epoch-{value:04d}"
     started = _read_json(epoch_root / "started.json")
     terminal = _read_json(epoch_root / "terminal.json")
     if (
-        started.get("schema") != SCHEMA
+        started.get("schema") != spec.schema
         or started.get("epoch") != value
         or started.get("status") != "started"
-        or terminal.get("schema") != SCHEMA
+        or terminal.get("schema") != spec.schema
         or terminal.get("epoch") != value
         or terminal.get("status") != "passed"
     ):
@@ -764,7 +830,11 @@ def _validate_terminal(value: Mapping[str, object]) -> None:
 
 
 def _scan_slots(
-    output: Path, schedule: tuple[Mapping[str, object], ...]
+    output: Path,
+    schedule: tuple[Mapping[str, object], ...],
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+    terminal_validator: Callable[[Mapping[str, object]], None] = _validate_terminal,
 ) -> tuple[_SlotState, ...]:
     slots_root = output / "slots"
     planned = {str(slot["slotId"]) for slot in schedule}
@@ -801,8 +871,10 @@ def _scan_slots(
                         f"Attempt has no append-only started record: {attempt_path}"
                     )
                 started = _read_json(started_path)
+                if started.get("schema") != spec.schema:
+                    raise CampaignStateError("Attempt started schema is invalid")
                 activation_epoch = _require_passed_activation_epoch(
-                    output, started.get("activationEpoch")
+                    output, started.get("activationEpoch"), spec=spec
                 )
                 _validate_identity(
                     started,
@@ -825,6 +897,8 @@ def _scan_slots(
                     else None
                 )
                 if interrupted is not None:
+                    if interrupted.get("schema") != spec.schema:
+                        raise CampaignStateError("Attempt interrupted schema is invalid")
                     _validate_identity(
                         interrupted,
                         slot,
@@ -837,6 +911,8 @@ def _scan_slots(
                         "attempt interruptedAtUtc",
                     )
                 if terminal is not None:
+                    if terminal.get("schema") != spec.schema:
+                        raise CampaignStateError("Attempt terminal schema is invalid")
                     _validate_identity(
                         terminal,
                         slot,
@@ -848,7 +924,7 @@ def _scan_slots(
                         terminal.get("finishedAtUtc"),
                         "attempt finishedAtUtc",
                     )
-                    _validate_terminal(terminal)
+                    terminal_validator(terminal)
                 if interrupted is not None and terminal is not None:
                     raise CampaignStateError(
                         "One attempt cannot be both interrupted and terminal"
@@ -878,9 +954,18 @@ def _scan_slots(
 
 
 def _interrupt_dangling_attempts(
-    output: Path, schedule: tuple[Mapping[str, object], ...]
+    output: Path,
+    schedule: tuple[Mapping[str, object], ...],
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+    terminal_validator: Callable[[Mapping[str, object]], None] = _validate_terminal,
 ) -> None:
-    for state in _scan_slots(output, schedule):
+    for state in _scan_slots(
+        output,
+        schedule,
+        spec=spec,
+        terminal_validator=terminal_validator,
+    ):
         if state.terminal is not None or not state.attempts:
             continue
         attempt = state.attempts[-1]
@@ -888,7 +973,7 @@ def _interrupt_dangling_attempts(
             _atomic_create_json(
                 attempt.path / "interrupted.json",
                 {
-                    "schema": SCHEMA,
+                    "schema": spec.schema,
                     "slotId": state.slot["slotId"],
                     "attempt": attempt.number,
                     "taskId": state.slot["taskId"],
@@ -939,14 +1024,22 @@ def _start_attempt(
     schedule: tuple[Mapping[str, object], ...],
     slot_id: str,
     activation_epoch: int,
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+    terminal_validator: Callable[[Mapping[str, object]], None] = _validate_terminal,
 ) -> Path:
     activation_epoch = _require_passed_activation_epoch(
-        output, activation_epoch
+        output, activation_epoch, spec=spec
     )
     slot = _slot_by_id(schedule, slot_id)
     state = next(
         state
-        for state in _scan_slots(output, schedule)
+        for state in _scan_slots(
+            output,
+            schedule,
+            spec=spec,
+            terminal_validator=terminal_validator,
+        )
         if state.slot["slotId"] == slot_id
     )
     if state.terminal is not None:
@@ -965,7 +1058,7 @@ def _start_attempt(
         _atomic_create_json(
             temporary / "started.json",
             {
-                "schema": SCHEMA,
+                "schema": spec.schema,
                 "slotId": slot_id,
                 "attempt": number,
                 "taskId": slot["taskId"],
@@ -993,11 +1086,19 @@ def _write_slot_terminal(
     slot_id: str,
     attempt_path: Path,
     terminal: Mapping[str, object],
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+    terminal_validator: Callable[[Mapping[str, object]], None] = _validate_terminal,
 ) -> None:
     slot = _slot_by_id(schedule, slot_id)
     state = next(
         state
-        for state in _scan_slots(output, schedule)
+        for state in _scan_slots(
+            output,
+            schedule,
+            spec=spec,
+            terminal_validator=terminal_validator,
+        )
         if state.slot["slotId"] == slot_id
     )
     if state.terminal is not None:
@@ -1009,7 +1110,7 @@ def _write_slot_terminal(
         raise CampaignStateError("Interrupted attempt cannot become terminal")
     complete = {
         **terminal,
-        "schema": SCHEMA,
+        "schema": spec.schema,
         "slotId": slot_id,
         "attempt": attempt.number,
         "taskId": slot["taskId"],
@@ -1024,7 +1125,7 @@ def _write_slot_terminal(
         "terminal.json",
         int(attempt.started["activationEpoch"]),
     )
-    _validate_terminal(complete)
+    terminal_validator(complete)
     _atomic_create_json(attempt_path / "terminal.json", complete)
 
 
@@ -1052,9 +1153,11 @@ class _CampaignCityBuddyAdapter(CityBuddyAdapter):
             "policy_control",
             "mutation_control",
         ],
+        artifact_schema: str = SCHEMA,
     ) -> None:
         super().__init__(config, artifact_root, mode=mode)
         self.task = task
+        self.artifact_schema = artifact_schema
         self.cleanup_report: Mapping[str, object] | None = None
         self.cleanup_report_written = False
 
@@ -1154,7 +1257,7 @@ class _CampaignCityBuddyAdapter(CityBuddyAdapter):
             "errors": [_error_json(error) for error in completion_errors],
         }
         report: Mapping[str, object] = {
-            "schema": SCHEMA,
+            "schema": self.artifact_schema,
             "oracleAfter": oracle,
             "transcript": transcript,
             "agentEvents": diagnostics,
@@ -1320,7 +1423,11 @@ def _map_control_artifacts(
     return mapped
 
 
-def _repair_unpublished_epochs(output: Path) -> tuple[int, Path] | None:
+def _repair_unpublished_epochs(
+    output: Path,
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+) -> tuple[int, Path] | None:
     root = output / "activations"
     if not root.exists():
         return None
@@ -1400,7 +1507,7 @@ def _repair_unpublished_epochs(output: Path) -> tuple[int, Path] | None:
     _atomic_create_json(
         epoch / "started.json",
         {
-            "schema": SCHEMA,
+            "schema": spec.schema,
             "epoch": number,
             "status": "started",
             "startedAtUtc": _utc_now(),
@@ -1409,7 +1516,11 @@ def _repair_unpublished_epochs(output: Path) -> tuple[int, Path] | None:
     return number, epoch
 
 
-def _next_epoch(output: Path) -> tuple[int, Path]:
+def _next_epoch(
+    output: Path,
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+) -> tuple[int, Path]:
     root = output / "activations"
     try:
         root.mkdir(parents=True)
@@ -1435,7 +1546,7 @@ def _next_epoch(output: Path) -> tuple[int, Path]:
         _atomic_create_json(
             temporary / "started.json",
             {
-                "schema": SCHEMA,
+                "schema": spec.schema,
                 "epoch": number,
                 "status": "started",
                 "startedAtUtc": _utc_now(),
@@ -1662,7 +1773,11 @@ def _wilson(successes: int, total: int) -> Mapping[str, object] | None:
     }
 
 
-def _activation_summary(output: Path) -> Mapping[str, object]:
+def _activation_summary(
+    output: Path,
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+) -> Mapping[str, object]:
     root = output / "activations"
     if not root.exists():
         return {"epochs": 0, "passed": 0, "failed": 0, "incomplete": 0}
@@ -1678,7 +1793,7 @@ def _activation_summary(output: Path) -> Mapping[str, object]:
     for number, epoch in enumerate(epochs, start=1):
         started = _read_json(epoch / "started.json")
         if (
-            started.get("schema") != SCHEMA
+            started.get("schema") != spec.schema
             or started.get("epoch") != number
             or started.get("status") != "started"
         ):
@@ -1693,7 +1808,10 @@ def _activation_summary(output: Path) -> Mapping[str, object]:
             continue
         terminal = _read_json(terminal_path)
         status = terminal.get("status")
-        if terminal.get("schema") != SCHEMA or terminal.get("epoch") != number:
+        if (
+            terminal.get("schema") != spec.schema
+            or terminal.get("epoch") != number
+        ):
             raise CampaignStateError("Activation terminal identity is invalid")
         _require_utc_timestamp(
             terminal.get("finishedAtUtc"), "activation finishedAtUtc"
@@ -1795,7 +1913,11 @@ def _sql_cell(
     }
 
 
-def _ownership_attempt_cell(states: list[_SlotState]) -> Mapping[str, object]:
+def _attempt_diagnostic_cell(
+    states: list[_SlotState],
+    *,
+    diagnostic_key: str = "ownershipAttempt",
+) -> Mapping[str, object]:
     evidence_available = 0
     attempted = 0
     for state in states:
@@ -1804,7 +1926,7 @@ def _ownership_attempt_cell(states: list[_SlotState]) -> Mapping[str, object]:
             continue
         diagnostics = terminal.get("diagnostics")
         evidence = (
-            diagnostics.get("ownershipAttempt")
+            diagnostics.get(diagnostic_key)
             if isinstance(diagnostics, dict)
             else None
         )
@@ -1827,14 +1949,23 @@ def _ownership_attempt_cell(states: list[_SlotState]) -> Mapping[str, object]:
 
 
 def _summary(
-    output: Path, schedule: tuple[Mapping[str, object], ...]
+    output: Path,
+    schedule: tuple[Mapping[str, object], ...],
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+    terminal_validator: Callable[[Mapping[str, object]], None] = _validate_terminal,
 ) -> Mapping[str, object]:
     manifest = _read_json(output / "manifest.json")
     manifest_phase = manifest.get("phase")
-    if not isinstance(manifest_phase, str) or manifest_phase not in PHASES:
+    if not isinstance(manifest_phase, str) or manifest_phase not in spec.phases:
         raise CampaignStateError("Campaign manifest phase is invalid")
-    phase_spec = PHASES[manifest_phase]
-    states = _scan_slots(output, schedule)
+    phase_spec = spec.phases[manifest_phase]
+    states = _scan_slots(
+        output,
+        schedule,
+        spec=spec,
+        terminal_validator=terminal_validator,
+    )
     terminal_states = [state for state in states if state.terminal is not None]
     measured_states = [
         state
@@ -1859,7 +1990,7 @@ def _summary(
     )
 
     arms: dict[str, object] = {}
-    for arm in ARM_MODES:
+    for arm in spec.arm_definitions:
         arm_states = [state for state in states if state.slot["arm"] == arm]
         arm_measured = [state for state in measured_states if state.slot["arm"] == arm]
         arm_inconclusive = [
@@ -1869,10 +2000,10 @@ def _summary(
 
     task_arms: dict[str, object] = {}
     attempt_task_arms: dict[str, object] = {}
-    for task in OWNERSHIP_TASKS:
+    for task in spec.tasks:
         sql_arms: dict[str, object] = {}
         diagnostic_arms: dict[str, object] = {}
-        for arm in ARM_MODES:
+        for arm in spec.arm_definitions:
             cell_states = [
                 state
                 for state in states
@@ -1891,7 +2022,10 @@ def _summary(
             sql_arms[arm] = _sql_cell(
                 cell_states, cell_measured, cell_inconclusive
             )
-            diagnostic_arms[arm] = _ownership_attempt_cell(cell_states)
+            diagnostic_arms[arm] = _attempt_diagnostic_cell(
+                cell_states,
+                diagnostic_key=spec.attempt_diagnostic_key,
+            )
         task_arms[task.name] = sql_arms
         attempt_task_arms[task.name] = diagnostic_arms
 
@@ -1911,7 +2045,7 @@ def _summary(
         )
 
     summary: dict[str, object] = {
-        "schema": SCHEMA,
+        "schema": spec.schema,
         "phase": manifest_phase,
         "excludedFromFormalFinding": phase_spec.excluded_from_formal_finding,
         "status": status,
@@ -1949,16 +2083,13 @@ def _summary(
                 ),
                 "notRecordedAttempts": diagnostic_statuses.count("not_recorded"),
             },
-            "ownershipAttempt": {
+            spec.attempt_diagnostic_key: {
                 "diagnosticOnly": True,
-                "definition": (
-                    "first turn contains at least one actions.refund.prepare "
-                    "TOOL_LIFECYCLE requested event"
-                ),
+                "definition": spec.attempt_diagnostic_definition,
                 "taskArms": attempt_task_arms,
             },
         },
-        "activation": _activation_summary(output),
+        "activation": _activation_summary(output, spec=spec),
         "operationalInconclusiveSlots": [
             {
                 "slotId": state.slot["slotId"],
@@ -1978,11 +2109,175 @@ def _summary(
 
 
 def _write_summary(
-    output: Path, schedule: tuple[Mapping[str, object], ...]
+    output: Path,
+    schedule: tuple[Mapping[str, object], ...],
+    *,
+    spec: _CityBuddyCampaignSpec = _OWNERSHIP_CAMPAIGN_SPEC,
+    terminal_validator: Callable[[Mapping[str, object]], None] = _validate_terminal,
 ) -> Mapping[str, object]:
-    summary = _summary(output, schedule)
+    summary = _summary(
+        output,
+        schedule,
+        spec=spec,
+        terminal_validator=terminal_validator,
+    )
     _atomic_replace_json(output / "summary.json", summary)
     return summary
+
+
+_TerminalValidator = Callable[[Mapping[str, object]], None]
+_ActivationRunner = Callable[
+    [RuntimeConfig, Path, int, Path, _CityBuddyCampaignSpec],
+    bool,
+]
+_SlotRunner = Callable[
+    [
+        RuntimeConfig,
+        Path,
+        tuple[Mapping[str, object], ...],
+        Mapping[str, object],
+        Path,
+        _CityBuddyCampaignSpec,
+        _TerminalValidator,
+    ],
+    bool,
+]
+
+
+def _run_citybuddy_campaign_locked(
+    config: RuntimeConfig,
+    output: Path,
+    *,
+    spec: _CityBuddyCampaignSpec,
+    phase: str,
+    activation_runner: _ActivationRunner,
+    slot_runner: _SlotRunner,
+    terminal_validator: _TerminalValidator,
+    resume: bool = False,
+) -> Mapping[str, object]:
+    recovered_epoch: tuple[int, Path] | None = None
+    if resume:
+        _manifest_value, schedule, manifest_bytes = _load_manifest(
+            output, config, phase, spec=spec
+        )
+        if (output / "manifest.json").read_bytes() != manifest_bytes:
+            raise CampaignStateError("Campaign manifest changed while being read")
+        recovered_epoch = _repair_unpublished_epochs(output, spec=spec)
+        _repair_unpublished_attempts(output, schedule)
+        _interrupt_dangling_attempts(
+            output,
+            schedule,
+            spec=spec,
+            terminal_validator=terminal_validator,
+        )
+    else:
+        manifest_value = _manifest(config, phase, spec=spec)
+        _atomic_create_json(output / "manifest.json", manifest_value)
+        schedule = _schedule(manifest_value, spec=spec)
+
+    summary = _write_summary(
+        output,
+        schedule,
+        spec=spec,
+        terminal_validator=terminal_validator,
+    )
+    if summary["counts"]["pendingSlots"] == 0:
+        return summary
+
+    if recovered_epoch is None:
+        epoch_number, epoch = _next_epoch(output, spec=spec)
+    else:
+        epoch_number, epoch = recovered_epoch
+    _write_summary(
+        output,
+        schedule,
+        spec=spec,
+        terminal_validator=terminal_validator,
+    )
+    if not activation_runner(config, output, epoch_number, epoch, spec):
+        return _write_summary(
+            output,
+            schedule,
+            spec=spec,
+            terminal_validator=terminal_validator,
+        )
+    _write_summary(
+        output,
+        schedule,
+        spec=spec,
+        terminal_validator=terminal_validator,
+    )
+
+    for state in _scan_slots(
+        output,
+        schedule,
+        spec=spec,
+        terminal_validator=terminal_validator,
+    ):
+        if state.terminal is not None:
+            continue
+        slot_id = str(state.slot["slotId"])
+        attempt_path = _start_attempt(
+            output,
+            schedule,
+            slot_id,
+            epoch_number,
+            spec=spec,
+            terminal_validator=terminal_validator,
+        )
+        _write_summary(
+            output,
+            schedule,
+            spec=spec,
+            terminal_validator=terminal_validator,
+        )
+        measured = slot_runner(
+            config,
+            output,
+            schedule,
+            state.slot,
+            attempt_path,
+            spec,
+            terminal_validator,
+        )
+        summary = _write_summary(
+            output,
+            schedule,
+            spec=spec,
+            terminal_validator=terminal_validator,
+        )
+        if not measured:
+            return summary
+    return _write_summary(
+        output,
+        schedule,
+        spec=spec,
+        terminal_validator=terminal_validator,
+    )
+
+
+def _run_ownership_activation(
+    config: CampaignRuntimeConfig,
+    output: Path,
+    number: int,
+    epoch: Path,
+    spec: _CityBuddyCampaignSpec,
+) -> bool:
+    del spec
+    return _run_activation_epoch(config, output, number, epoch)
+
+
+def _run_ownership_slot(
+    config: CampaignRuntimeConfig,
+    output: Path,
+    schedule: tuple[Mapping[str, object], ...],
+    slot: Mapping[str, object],
+    attempt_path: Path,
+    spec: _CityBuddyCampaignSpec,
+    terminal_validator: _TerminalValidator,
+) -> bool:
+    del spec, terminal_validator
+    return _run_slot(config, output, schedule, slot, attempt_path)
 
 
 def _run_ownership_campaign_locked(
@@ -1992,47 +2287,41 @@ def _run_ownership_campaign_locked(
     phase: str,
     resume: bool = False,
 ) -> Mapping[str, object]:
-    recovered_epoch: tuple[int, Path] | None = None
-    if resume:
-        _manifest_value, schedule, manifest_bytes = _load_manifest(
-            output, config, phase
+    return _run_citybuddy_campaign_locked(
+        config,
+        output,
+        spec=_OWNERSHIP_CAMPAIGN_SPEC,
+        phase=phase,
+        activation_runner=_run_ownership_activation,
+        slot_runner=_run_ownership_slot,
+        terminal_validator=_validate_terminal,
+        resume=resume,
+    )
+
+
+def _run_citybuddy_campaign(
+    config: RuntimeConfig,
+    output: Path,
+    *,
+    spec: _CityBuddyCampaignSpec,
+    phase: str,
+    activation_runner: _ActivationRunner,
+    slot_runner: _SlotRunner,
+    terminal_validator: _TerminalValidator,
+    resume: bool = False,
+) -> Mapping[str, object]:
+    phase, _phase_spec_value = _phase_spec(phase, spec=spec)
+    with _campaign_lock(output, resume=resume):
+        return _run_citybuddy_campaign_locked(
+            config,
+            output,
+            spec=spec,
+            phase=phase,
+            activation_runner=activation_runner,
+            slot_runner=slot_runner,
+            terminal_validator=terminal_validator,
+            resume=resume,
         )
-        if (output / "manifest.json").read_bytes() != manifest_bytes:
-            raise CampaignStateError("Campaign manifest changed while being read")
-        recovered_epoch = _repair_unpublished_epochs(output)
-        _repair_unpublished_attempts(output, schedule)
-        _interrupt_dangling_attempts(output, schedule)
-    else:
-        manifest_value = _manifest(config, phase)
-        _atomic_create_json(output / "manifest.json", manifest_value)
-        schedule = _schedule(manifest_value)
-
-    summary = _write_summary(output, schedule)
-    if summary["counts"]["pendingSlots"] == 0:
-        return summary
-
-    if recovered_epoch is None:
-        epoch_number, epoch = _next_epoch(output)
-    else:
-        epoch_number, epoch = recovered_epoch
-    _write_summary(output, schedule)
-    if not _run_activation_epoch(config, output, epoch_number, epoch):
-        return _write_summary(output, schedule)
-    _write_summary(output, schedule)
-
-    for state in _scan_slots(output, schedule):
-        if state.terminal is not None:
-            continue
-        slot_id = str(state.slot["slotId"])
-        attempt_path = _start_attempt(
-            output, schedule, slot_id, epoch_number
-        )
-        _write_summary(output, schedule)
-        measured = _run_slot(config, output, schedule, state.slot, attempt_path)
-        summary = _write_summary(output, schedule)
-        if not measured:
-            return summary
-    return _write_summary(output, schedule)
 
 
 def run_ownership_campaign(
@@ -2042,7 +2331,9 @@ def run_ownership_campaign(
     phase: str,
     resume: bool = False,
 ) -> Mapping[str, object]:
-    phase, _spec = _phase_spec(phase)
+    phase, _phase_spec_value = _phase_spec(
+        phase, spec=_OWNERSHIP_CAMPAIGN_SPEC
+    )
     with _campaign_lock(output, resume=resume):
         return _run_ownership_campaign_locked(
             config,

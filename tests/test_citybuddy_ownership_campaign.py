@@ -138,13 +138,13 @@ def fixed_runtime(
     compact_phases: bool = True,
 ) -> Iterator[None]:
     phase_context = (
-        patch.object(
-            campaign,
-            "PHASES",
+        patch.dict(
+            campaign.PHASES,
             {
                 "calibration": campaign._PhaseSpec(2026083101, 1, True),
                 "formal": campaign._PhaseSpec(2026083102, 1, False),
             },
+            clear=True,
         )
         if compact_phases
         else nullcontext()
