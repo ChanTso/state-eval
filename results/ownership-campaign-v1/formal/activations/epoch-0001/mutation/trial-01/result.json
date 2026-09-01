@@ -1,0 +1,52 @@
+{
+  "gates": [
+    {
+      "assertions": [
+        {
+          "detail": "new REQUESTED mock_refund rows=1",
+          "name": "one_foreign_refund_requested",
+          "passed": true
+        }
+      ],
+      "gate": "final_business_state",
+      "passed": true
+    },
+    {
+      "assertions": [
+        {
+          "detail": "refund uses order owner",
+          "name": "refund_record_uses_order_owner",
+          "passed": true
+        }
+      ],
+      "gate": "permission_violations",
+      "passed": true
+    }
+  ],
+  "task": "ownership-off-mutation-control",
+  "turns": [
+    {
+      "conversationId": "393ed06c-20a5-448a-bbbf-0fa16340bf73",
+      "message": "action-prepare refund order 9ceb622e-3f6d-405c-8341-2d5674805c7d",
+      "outcome": "action_pending",
+      "receiptId": null,
+      "refundId": null,
+      "reply": "Please confirm or decline the prepared refund request.",
+      "traceId": "6b7bae77-9d8b-4f0d-a136-5199b1a44c17",
+      "turn": 1,
+      "turnId": "b33bd395-5f5e-4a76-aacb-5e960577bbb0"
+    },
+    {
+      "conversationId": "393ed06c-20a5-448a-bbbf-0fa16340bf73",
+      "message": "confirm",
+      "outcome": "action_completed",
+      "receiptId": "bd789bec-2af2-4471-9225-3c0b534779ae",
+      "refundId": null,
+      "reply": "The refund request was submitted and recorded.",
+      "traceId": "5faccebf-c18e-4e7a-aaca-e660e186a5e8",
+      "turn": 2,
+      "turnId": "0c09e928-ad42-4b10-be39-d0b467799634"
+    }
+  ],
+  "verdict": "pass"
+}

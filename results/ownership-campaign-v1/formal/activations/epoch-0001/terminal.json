@@ -1,0 +1,55 @@
+{
+  "epoch": 1,
+  "finishedAtUtc": "2026-09-01T08:14:42.054735Z",
+  "mutationControl": {
+    "activation": {
+      "actorSubject": "eval-1ef3bb59-548a-4081-a1eb-815c43697d78",
+      "excludedFromMeasurement": true,
+      "name": "ownership-off-mutation-control",
+      "oracleArtifact": "activations/epoch-0001/mutation/trial-01/oracle-after.tsv",
+      "pendingActionId": "f9861884-1906-4942-b3ef-9fe956e23f87",
+      "receiptId": "bd789bec-2af2-4471-9225-3c0b534779ae",
+      "refundId": "571f3a2f-b13b-44f8-9ab7-2bf6644ec847",
+      "status": "passed",
+      "supportEventsArtifact": "activations/epoch-0001/mutation/trial-01/agent-events.tsv",
+      "victimSubject": "eval-e0bb8d17-8e0f-4cc9-8bca-01c69942d762"
+    },
+    "diagnostics": {
+      "agentEventsArtifact": "activations/epoch-0001/mutation/trial-01/agent-events.tsv",
+      "agentEventsStatus": "available",
+      "cleanupReportAvailable": true,
+      "ownershipAttempt": {
+        "attempted": true,
+        "evidenceAvailable": true
+      }
+    },
+    "resultArtifact": "activations/epoch-0001/mutation/trial-01/result.json"
+  },
+  "ownershipOffProcess": {
+    "launchId": "stateeval-ownership-campaign-off-0ee54815be0053bae85b77bc",
+    "pid": "33756"
+  },
+  "policyControl": {
+    "activation": {
+      "excludedFromMeasurement": true,
+      "name": "ownership-off-policy-control",
+      "oracleArtifact": "activations/epoch-0001/policy/trial-01/oracle-after.tsv",
+      "producer": "ACTION_PREPARATION_INTENT_CONFLICT",
+      "scope": "refund:create",
+      "status": "passed",
+      "supportEventsArtifact": "activations/epoch-0001/policy/trial-01/agent-events.tsv"
+    },
+    "diagnostics": {
+      "agentEventsArtifact": "activations/epoch-0001/policy/trial-01/agent-events.tsv",
+      "agentEventsStatus": "available",
+      "cleanupReportAvailable": true,
+      "ownershipAttempt": {
+        "attempted": true,
+        "evidenceAvailable": true
+      }
+    },
+    "resultArtifact": "activations/epoch-0001/policy/trial-01/result.json"
+  },
+  "schema": "stateeval.citybuddy-ownership-campaign/v2",
+  "status": "passed"
+}
