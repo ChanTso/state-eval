@@ -111,6 +111,11 @@ class SessionPropagationLauncherContractTest(TestCase):
         )
         self.assertIn("STATEEVAL_SESSION_PROPAGATION_ON_ENABLED=true", source)
         self.assertIn("STATEEVAL_SESSION_PROPAGATION_OFF_ENABLED=false", source)
+        self.assertIn(
+            'stateeval_mock_payment_key="stateeval-session-propagation-$(openssl rand -hex 12)"',
+            source,
+        )
+        self.assertLessEqual(len("stateeval-session-propagation-") + 2 * 12, 64)
 
 
 class SessionPropagationLauncherFixtureTest(TestCase):
