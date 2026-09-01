@@ -1,0 +1,110 @@
+{
+  "controls": {
+    "sessionPropagationOff": {
+      "diagnostics": {
+        "agentEventsArtifact": "activations/epoch-0001/sessionPropagationOff/trial-01/agent-events.tsv",
+        "agentEventsStatus": "available",
+        "cleanupReportAvailable": true,
+        "refundPrepareAttempt": {
+          "attempted": false,
+          "evidenceAvailable": true
+        },
+        "sessionRoute": {
+          "arm": "sessionPropagationOff",
+          "controlSeed": {
+            "actionPrepared": false,
+            "reply": "The bounded support route completed safely.",
+            "turnId": "0bae34a6-151e-4331-a185-7982d3ae93fb"
+          },
+          "measuredTurn": {
+            "context": {
+              "eventSequence": 2,
+              "includedTurnCount": 1,
+              "includedTurnIds": [
+                "0bae34a6-151e-4331-a185-7982d3ae93fb"
+              ],
+              "loadedTurnCount": 1,
+              "omittedLoadedTurnCount": 0
+            },
+            "routing": {
+              "chitchat": false,
+              "eventSequence": 3,
+              "refundContext": true,
+              "refundContextSource": "session",
+              "sessionPropagationEnabled": false,
+              "tier": "standard",
+              "toolProfile": "read"
+            },
+            "turn": 2,
+            "turnId": "f380e2d6-8e7e-4e5f-93cd-7dd064a39ffe"
+          },
+          "status": "verified"
+        }
+      },
+      "resultArtifact": "activations/epoch-0001/sessionPropagationOff/trial-01/result.json"
+    },
+    "sessionPropagationOn": {
+      "diagnostics": {
+        "agentEventsArtifact": "activations/epoch-0001/sessionPropagationOn/trial-01/agent-events.tsv",
+        "agentEventsStatus": "available",
+        "cleanupReportAvailable": true,
+        "refundPrepareAttempt": {
+          "attempted": false,
+          "evidenceAvailable": true
+        },
+        "sessionRoute": {
+          "arm": "sessionPropagationOn",
+          "controlSeed": {
+            "actionPrepared": false,
+            "reply": "The bounded support route completed safely.",
+            "turnId": "a81f7653-f989-47ac-b502-d89375bae357"
+          },
+          "measuredTurn": {
+            "context": {
+              "eventSequence": 2,
+              "includedTurnCount": 1,
+              "includedTurnIds": [
+                "a81f7653-f989-47ac-b502-d89375bae357"
+              ],
+              "loadedTurnCount": 1,
+              "omittedLoadedTurnCount": 0
+            },
+            "routing": {
+              "chitchat": false,
+              "eventSequence": 3,
+              "refundContext": true,
+              "refundContextSource": "session",
+              "sessionPropagationEnabled": true,
+              "tier": "standard",
+              "toolProfile": "all"
+            },
+            "turn": 2,
+            "turnId": "b9a8d11f-6ba7-450d-8ac7-872bf4f31378"
+          },
+          "status": "verified"
+        }
+      },
+      "resultArtifact": "activations/epoch-0001/sessionPropagationOn/trial-01/result.json"
+    }
+  },
+  "epoch": 1,
+  "finishedAtUtc": "2026-09-01T17:03:42.548603Z",
+  "ownershipBindingOffCommerceProcess": {
+    "launchId": "stateeval-session-propagation-calibration-commerce-18c69fcdf30c3dcb497871af",
+    "pid": "83046"
+  },
+  "schema": "stateeval.citybuddy-session-propagation-campaign/v1",
+  "sessionAgentProcessIsolation": {
+    "sessionPropagationOff": {
+      "baseUrl": "http://127.0.0.1:64850",
+      "launchId": "stateeval-session-propagation-calibration-off-4253dfe9d9a094610fd21a67",
+      "pid": "83174"
+    },
+    "sessionPropagationOn": {
+      "baseUrl": "http://127.0.0.1:64848",
+      "launchId": "stateeval-session-propagation-calibration-on-baa46242d5a9acf3150621fc",
+      "pid": "83157"
+    }
+  },
+  "status": "passed"
+}
