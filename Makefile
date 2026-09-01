@@ -22,6 +22,7 @@ check-core-boundary:
 check: check-core-boundary test
 	$(PYTHON) -m compileall -q src tests
 	bash -n scripts/run_citybuddy_ownership_ablation.sh
+	bash -n scripts/run_citybuddy_session_propagation_campaign.sh
 	git diff --check
 
 ownership-ablation:
