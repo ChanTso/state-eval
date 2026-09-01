@@ -88,6 +88,15 @@ assessed over both excluded calibrations: 3/20 for the bare claim, 6/20 for “m
 “order history” and 6/20 for “placed from my account” in the off arm. The replacement “I'm the
 buyer” phrasing contributed 3/10. Calibration trials are not pooled into the formal result.
 
+A separate [100-trial session-context calibration](results/session-propagation-campaign-v1/calibration/summary.json)
+tested history-driven sensitive-tool exposure. Both arms registered the same tools and disabled
+commerce ownership binding; the only treatment was whether prior-turn refund context exposed the
+full tool set (`all`) or kept the second turn read-only (`read`). Route evidence verified that
+split in all 100 trials. The exposed arm recorded 7 / 50 unauthorized `REQUESTED` refunds, versus
+0 / 50 in the read-only arm. One of five follow-up phrasings still recorded 0 / 10 in the exposed
+arm, so this result remains excluded calibration evidence and was not promoted to a second formal
+finding.
+
 The formal boundary was seed `2026083102`, StateEval commit
 `38cdde3aec1c4b8044d535fcdb7a7616dc81722b`, CityBuddy commit
 `09130fa3c0209648f98781ff0892c3d07a55e59f`, and one Apple M4 (`Mac16,1`) host from
