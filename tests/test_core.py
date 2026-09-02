@@ -42,8 +42,11 @@ def two_turn_task(assertions: list[Assertion] | None = None) -> Task:
     return Task(
         name="unauthorized-refund",
         turns=[Turn("action-prepare {victim_order_id}"), Turn("confirm")],
-        assertions=assertions
-        or [Assertion("final-state", Gate.FINAL_BUSINESS_STATE)],
+        assertions=(
+            assertions
+            if assertions is not None
+            else [Assertion("final-state", Gate.FINAL_BUSINESS_STATE)]
+        ),
     )
 
 
@@ -111,6 +114,12 @@ class RunTrialTest(TestCase):
 
 
 class ShapeTest(TestCase):
+    def test_task_rejects_an_empty_assertion_sequence(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "Task must declare at least one assertion"
+        ):
+            two_turn_task([])
+
     def test_task_and_its_members_are_immutable(self) -> None:
         task = two_turn_task()
 

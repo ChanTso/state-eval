@@ -47,9 +47,13 @@ class Task:
         turns: Sequence[Turn],
         assertions: Sequence[Assertion],
     ) -> None:
+        normalized_assertions = tuple(assertions)
+        if not normalized_assertions:
+            raise ValueError("Task must declare at least one assertion")
+
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "turns", tuple(turns))
-        object.__setattr__(self, "assertions", tuple(assertions))
+        object.__setattr__(self, "assertions", normalized_assertions)
 
 
 @dataclass(frozen=True)
