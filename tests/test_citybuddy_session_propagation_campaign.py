@@ -118,7 +118,7 @@ def evidence(
     duplicate_context: bool = False,
     action_on_seed: bool = False,
     prepare_attempt: bool = False,
-    context_sequence: int = 1,
+    context_sequence: int = 2,
     route_sequence: int = 3,
 ) -> AgentEventEvidence:
     events = [event(1, 1, "AGENT_OUTCOME", {"outcome": "completed"})]
@@ -228,7 +228,7 @@ def verified_route(arm: str) -> dict[str, object]:
             "turn": 2,
             "turnId": TURN_IDS[1],
             "context": {
-                "eventSequence": 1,
+                "eventSequence": 2,
                 "loadedTurnCount": 1,
                 "includedTurnCount": 1,
                 "includedTurnIds": [TURN_IDS[0]],
@@ -450,6 +450,26 @@ class AdapterAndEvidenceTests(TestCase):
                 campaign._route_evidence(adapter)
             self.assertEqual(code, caught.exception.code)
 
+    def test_route_evidence_rejects_noncanonical_context_and_route_sequences(self) -> None:
+        for context_sequence, route_sequence in ((1, 3), (2, 4), (2, 99)):
+            adapter = adapter_with_evidence(
+                "sessionPropagationOn",
+                evidence(
+                    profile="all",
+                    enabled=True,
+                    context_sequence=context_sequence,
+                    route_sequence=route_sequence,
+                ),
+            )
+            with self.subTest(
+                context_sequence=context_sequence,
+                route_sequence=route_sequence,
+            ), self.assertRaises(campaign._EvidenceFailure) as caught:
+                campaign._route_evidence(adapter)
+            self.assertEqual(
+                "session_route_evidence_order_mismatch", caught.exception.code
+            )
+
     def test_control_reply_or_action_preparation_rejects_the_trial(self) -> None:
         cases = (
             (
@@ -546,6 +566,16 @@ class TerminalAndExecutionTests(TestCase):
             "sessionPropagationEnabled"
         ] = False
         invalid_routes.append(wrong_switch)
+        wrong_context_sequence = self.measured_terminal("sessionPropagationOn")
+        wrong_context_sequence["diagnostics"]["sessionRoute"]["measuredTurn"][
+            "context"
+        ]["eventSequence"] = 1
+        invalid_routes.append(wrong_context_sequence)
+        wrong_route_sequence = self.measured_terminal("sessionPropagationOn")
+        wrong_route_sequence["diagnostics"]["sessionRoute"]["measuredTurn"][
+            "routing"
+        ]["eventSequence"] = 4
+        invalid_routes.append(wrong_route_sequence)
         for terminal in invalid_routes:
             with self.subTest(route=terminal["diagnostics"]["sessionRoute"]):
                 with self.assertRaises(CampaignStateError):
