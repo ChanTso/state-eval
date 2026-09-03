@@ -443,10 +443,10 @@ def _route_evidence(
     turn_two_events = _events_for_turn(trial.agent_event_evidence, 2)
     context_event = _single_event(turn_two_events, "CONTEXT_WINDOW")
     route_event = _single_event(turn_two_events, "ROUTING_DECISION")
-    if context_event.sequence >= route_event.sequence:
+    if context_event.sequence != 2 or route_event.sequence != 3:
         raise _EvidenceFailure(
             "session_route_evidence_order_mismatch",
-            "turn 2 routing did not follow its context window",
+            "turn 2 is not CONTEXT_WINDOW@2 followed by ROUTING_DECISION@3",
         )
     context = context_event.payload
     included_turn_ids = context.get("includedTurnIds")
@@ -594,6 +594,7 @@ def _validate_session_terminal(value: Mapping[str, object]) -> None:
     arm = value.get("arm")
     route = diagnostics.get("sessionRoute")
     measured_turn = route.get("measuredTurn") if isinstance(route, dict) else None
+    context = measured_turn.get("context") if isinstance(measured_turn, dict) else None
     routing = measured_turn.get("routing") if isinstance(measured_turn, dict) else None
     expected = _ARM_ROUTE_EXPECTATIONS.get(str(arm))
     if not (
@@ -601,7 +602,10 @@ def _validate_session_terminal(value: Mapping[str, object]) -> None:
         and isinstance(route, dict)
         and route.get("status") == "verified"
         and route.get("arm") == arm
+        and isinstance(context, dict)
+        and context.get("eventSequence") == 2
         and isinstance(routing, dict)
+        and routing.get("eventSequence") == 3
         and routing.get("toolProfile") == expected[1]
         and routing.get("sessionPropagationEnabled") is expected[0]
     ):
