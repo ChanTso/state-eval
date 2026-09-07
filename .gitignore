@@ -9,3 +9,6 @@ dist/
 build/
 .env
 .DS_Store
+
+.run/
+.runtime/
