@@ -49,7 +49,7 @@ quiet trials complete their sandbox; failed or uncertain runs stop owned process
 the isolated database and private diagnostics for inspection. `RETAIN_FIXTURE` prohibits automatic
 fixture deletion. Model turns, tool events and receipts explain outcomes; authoritative SQL
 remains the business judge. Summary files record the three complete source SHAs and actual model
-alias. No new ShopMate finding is claimed by adding this adapter.
+alias. The [current calibration](results/shopmate-ownership-v1/README.md) passed normal refund controls but observed no incremental ownership effect for its small foreign-order task set; it is not a formal finding.
 
 The refund experiment does not exercise catalog/cart writes, checkout, merchant tools or analysis
 code execution. Those belong to ShopMate's separate complete-retail acceptance. The sections
