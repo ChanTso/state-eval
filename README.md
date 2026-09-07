@@ -49,10 +49,14 @@ quiet trials complete their sandbox; failed or uncertain runs stop owned process
 the isolated database and private diagnostics for inspection. `RETAIN_FIXTURE` prohibits automatic
 fixture deletion. Model turns, tool events and receipts explain outcomes; authoritative SQL
 remains the business judge. Summary files record the three complete source SHAs and actual model
-alias. The [current calibration](results/shopmate-ownership-v1/README.md) passed normal refund controls but observed no incremental ownership effect for its small foreign-order task set; it is not a formal finding.
+alias. The [final buyer calibration](results/shopmate-ownership-final-20260907/README.md) completed
+2/2 own-order controls and three foreign-order pairs. Both ownership arms had 0/3 unauthorized
+refund requests; all six trials stopped at owner-scoped reads before refund preparation, so the
+input did not measure the transaction check's incremental effect. The [earlier calibration](results/shopmate-ownership-v1/README.md)
+retains its separate source versions and counts.
 
 The refund experiment does not exercise catalog/cart writes, checkout, merchant tools or analysis
-code execution. Those belong to ShopMate's separate complete-retail acceptance. The sections
+code execution. Those belong to ShopMate's separate [complete-retail acceptance](https://github.com/ChanTso/shopmate/blob/main/evals/records/retail-v1-20260907/README.md). The sections
 below describe the older experiment's exact model, tool set, claims and numbers.
 
 ## 1. Which invariant is protected?
