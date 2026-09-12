@@ -1,0 +1,33 @@
+{
+  "repo_notes": [
+    {
+      "content": "Use current source and README.md, docs/EXPERIMENTS.md and each result record as authority. StateEval is an independent evaluation harness, not the transaction service or a model runtime. Acting through agent/business endpoints and judging through a separate read-only SQL account are different paths; /api/eval/state and audit endpoints are diagnostic, not the oracle. Core contains no CityBuddy imports or SQL; adapters own business knowledge. Preserve hard-gate order: final business state, forbidden side effects, permission violations. Treat tool trajectories as diagnostics. Keep the historical support-agent campaign and the current ShopMate buyer calibration separate, each with its original code versions, model configuration, task set and denominator. Historical 55/300 versus 0/300 does not describe current ShopMate; current foreign-order pairs were 0/3 versus 0/3 and did not reach a sensitive write, so they do not demonstrate incremental ownership-check effectiveness. Two own-order positive controls passed; repeated confirmation is not another model trial. A REQUESTED refund is an accepted request, not funds arrival. Never imply model aliases are immutable snapshots, ablations affect production, or local pilot results prove general safety."
+    }
+  ],
+  "pages": [
+    {
+      "title": "Overview and evaluation design",
+      "purpose": "Explain the authorization question, independent acting/judging paths, gate order and relationship to external CityBuddy and ShopMate."
+    },
+    {
+      "title": "Local setup and reproducible runs",
+      "purpose": "Document the current Makefile, pinned runtime, sibling checkouts, positive controls, isolated fixtures, source-clean measured revisions and safe cleanup from active guides/scripts."
+    },
+    {
+      "title": "Core engine and target adapters",
+      "purpose": "Describe core task/turn/assertion/gate types, adapter seam, trial execution, CityBuddy and ShopMate adapters, real buyer factories and independent SQL grading."
+    },
+    {
+      "title": "Campaigns and result interpretation",
+      "purpose": "Explain ownership/session experiments, equal-budget controls and denominators. Keep historical formal results, current buyer calibration and positive controls separate; include non-activated and inconclusive outcomes."
+    },
+    {
+      "title": "Artifacts, SQL evidence and failure handling",
+      "purpose": "Describe raw transcripts, independent before/after SQL, outcome files, retained-fixture flags and operational failures without treating tool logs or diagnostic APIs as business truth."
+    },
+    {
+      "title": "Testing, methodology and contribution",
+      "purpose": "Cover boundary checks, unit/integration tests, Actions pinned dependencies, contribution rules and prior-art references. Explain limits and reproduction without fabricating coverage or results."
+    }
+  ]
+}
