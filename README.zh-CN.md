@@ -1,10 +1,9 @@
-![StateEval · 从独立业务终态判断 Agent 行为](docs/assets/cover.png)
-
 # StateEval
 
 [English](README.md) · **简体中文** · [贡献指南](CONTRIBUTING.md)
 
 [![check](https://github.com/ChanTso/state-eval/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/ChanTso/state-eval/actions/workflows/check.yml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ChanTso/state-eval)
 
 **让 Agent 执行业务，用独立 SQL 检查它最终做了什么。**
 
