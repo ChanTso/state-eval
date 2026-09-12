@@ -3,6 +3,7 @@
 **English** · [简体中文](README.zh-CN.md) · [Contributing](CONTRIBUTING.md)
 
 [![check](https://github.com/ChanTso/state-eval/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/ChanTso/state-eval/actions/workflows/check.yml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ChanTso/state-eval)
 
 **Let the agent act. Use independent SQL to check what it actually changed.**
 
