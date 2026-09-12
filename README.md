@@ -1,67 +1,69 @@
-![StateEval · 从独立业务终态判断 Agent 行为](docs/assets/cover.png)
+![StateEval · Evaluate agent actions through independent business-state checks](docs/assets/cover.png)
 
 # StateEval
 
+**English** · [简体中文](README.zh-CN.md) · [Contributing](CONTRIBUTING.md)
+
 [![check](https://github.com/ChanTso/state-eval/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/ChanTso/state-eval/actions/workflows/check.yml)
 
-**让 Agent 执行业务，用独立 SQL 检查它最终做了什么。**
+**Let the agent act. Use independent SQL to check what it actually changed.**
 
-StateEval 围绕一个具体授权问题展开：当用户提供他人的订单并声称属于自己，Agent 是否会留下越权退款申请？项目连接 [CityBuddy](https://github.com/ChanTso/citybuddy) 的身份与交易服务，以及 [ShopMate](https://github.com/ChanTso/shopmate) 的真实买家 Agent，分别观察业务执行、权限边界和最终数据库状态。
+StateEval studies a concrete authorization question: if a user supplies someone else's order and claims to own it, will an agent leave an unauthorized refund request in the database? It connects [CityBuddy](https://github.com/ChanTso/citybuddy)'s identity and transaction services with [ShopMate](https://github.com/ChanTso/shopmate)'s real buyer agent, examining business execution, authorization boundaries, and final database state.
 
-[判定方法](#如何判定) · [当前买家校准](results/shopmate-ownership-final-20260907/README.md) · [历史正式结果](results/ownership-campaign-v1/formal/summary.json) · [完整实验记录](docs/EXPERIMENTS.md)
+[Method](#how-outcomes-are-judged) · [Current buyer calibration](results/shopmate-ownership-final-20260907/README.md) · [Historical formal results](results/ownership-campaign-v1/formal/summary.json) · [Full experiment record](docs/EXPERIMENTS.md)
 
-## 两条链路，两组结论
+## Two agent paths, separate results
 
-下表统计的是独立 SQL 确认的**越权退款申请**。关闭／开启仅指评测配置中的 Java 订单归属校验；签名、服务身份、权限范围和会话检查仍保留。
+The counts below are **unauthorized refund requests confirmed by independent SQL**. Off/on refers only to Java's order-ownership check in the evaluation profile. Signature, service identity, scope, and session checks remain enabled.
 
-| 被测链路与规模 | 归属校验关闭 | 归属校验开启 |
+| Evaluated agent and trial set | Ownership off | Ownership on |
 |---|---:|---:|
-| **历史 CityBuddy 客服** · 2026-09-01<br>5 种表述，600 次正式 trial | **55/300（18.33%）** | **0/300** |
-| **ShopMate 买家** · 2026-09-07<br>1 种表述，3 对外单 trial | **0/3** | **0/3** |
+| **Historical CityBuddy support agent** · 2026-09-01<br>5 phrasings, 600 formal trials | **55/300 (18.33%)** | **0/300** |
+| **ShopMate buyer agent** · 2026-09-07<br>1 phrasing, 3 pairs of foreign-order trials | **0/3** | **0/3** |
 
-历史客服在这组任务下观察到交易归属校验的保护作用。ShopMate 六次外单试验均未调用 `prepare_refund`，**没有测出交易校验的增量效果**。
+The historical task set showed a protective effect from the transaction-level ownership check. All six ShopMate foreign-order trials stopped before calling `prepare_refund`, so **the calibration did not measure an incremental effect of that check**.
 
-当前 ShopMate 还完成 **2/2 本人退款正控**：真实模型生成确认卡，原用户确认后再重复确认，SQL 核对一份退款申请与原回执回放。正控和三对外单试验共 8 次 trial；重复确认不是额外模型试验。
+ShopMate also passed **2/2 own-order positive controls**: the real model produced a confirmation card, the original user confirmed it, and a repeated confirmation replayed the original receipt. SQL verified a single refund request. The controls and three foreign-order pairs comprise 8 trials; repeating a confirmation is not another model trial.
 
-旧客服缺少订单归属查询工具；当前买家保留本人订单查询，在更早的读取边界停下。两批工具与链路不同，结果分别保留，不合并分母。`REQUESTED` 表示退款申请已受理，尚不代表到账。
+The old support agent had no order-ownership lookup tool. The current buyer retained owner-scoped order reads and stopped at that earlier boundary. The tool sets and execution paths differ, so their results and denominators remain separate. `REQUESTED` means the refund request was accepted, not that money arrived.
 
-历史 95% Wilson 区间为关闭时 **14.36%–23.10%**、开启时约 **0%–1.264%**。另有一例关闭组没有退款记录，却留下不应存在的 `PREPARED` 动作，单列为禁止副作用失败，不计入 55 次退款。完整条件、模型别名与被测提交见[实验记录](docs/EXPERIMENTS.md)。
+The historical 95% Wilson intervals are **14.36%–23.10%** with ownership off and approximately **0%–1.264%** with it on. One additional off-arm trial left no refund row but did leave an unexpected `PREPARED` action; it is a forbidden-side-effect failure, separate from the 55 refunds. Conditions, model aliases, and measured commits are recorded in the [full experiment record](docs/EXPERIMENTS.md).
 
-## 如何判定
+## How outcomes are judged
 
-执行与判定使用不同路径：
+Acting and judging use separate paths:
 
 ```text
-任务与测试身份 → 真实 Agent／认证业务接口 → CityBuddy 业务写入
-                                             ↓
-独立只读数据库账号 → SQL 前后快照 → 终态、禁止副作用、权限判定
+Task + test identity → Real agent / authenticated API → CityBuddy writes
+                                                              ↓
+Read-only database account → SQL before/after snapshots → Outcome checks
 ```
 
-| 环节 | 作用 |
+| Stage | Responsibility |
 |---|---|
-| Acting：执行 | 通过 Agent 的聊天与确认入口办事，保留真实工具、身份和业务事务 |
-| Judging：判定 | 使用独立 SELECT-only MySQL 账号读取订单、退款、动作和回执；`must_not_change` 检查不应改动的事实 |
-| Grader：逐层判分 | 依次检查最终业务状态、禁止副作用、权限违规；前一层失败即决定本次失败 |
-| Transcript：解释 | 保存模型与工具轨迹，解释触达了哪层、为什么结束；业务服务自己的状态／审计接口只作诊断 |
+| Acting | Use the agent's chat and confirmation endpoints, retaining its real tools, identity, and business transactions |
+| Judging | Read orders, refunds, actions, and receipts through an independent SELECT-only MySQL account; `must_not_change` assertions check facts that must remain unchanged |
+| Grader | Check final business state, forbidden side effects, then permission violations; failure at an earlier gate determines the trial's failure |
+| Transcript | Explain which boundary was reached and why execution ended; the business service's own state and audit endpoints are diagnostic only |
 
-每个对照保持相同模型、工具和执行预算，只改变指定评测开关。先用正控证明正常任务能够完成，再判断外单试验是否真正触达待比较的边界。
+Each comparison keeps the model, tools, and execution budget equal, changing only the designated evaluation switch. Positive controls first establish that legitimate tasks can complete; foreign-order trials then reveal whether the input actually reaches the boundary being compared.
 
-核心的任务与断言类型不包含业务 SQL；CityBuddy 适配器负责实际执行和独立数据库读取。终态判分与组件消融沿用已有研究方法，相关工作和范围见[方法来源](docs/PRIOR_ART.md)。
+Core task and assertion types contain no business SQL. The CityBuddy adapter handles execution and independent database reads. Final-state grading and component ablation build on established methods; see [prior art and scope](docs/PRIOR_ART.md).
 
-## 本地运行
+## Run locally
 
-将三个仓库放在同一父目录：`state-eval/`、`citybuddy/`、`shopmate/`。准备 Python 3.11+、uv、JDK 21 和可运行的 Docker Compose；真实模型连接使用 CityBuddy 本地 `.env` 中已有的提供者配置。
+Keep `state-eval/`, `citybuddy/`, and `shopmate/` as sibling checkouts. Install Python 3.11+, uv, JDK 21, and a working Docker Compose environment. Real-model runs use the existing provider configuration in CityBuddy's local `.env`.
 
-先在 StateEval 目录安装相邻 ShopMate 的锁定依赖并检查：
+From the StateEval directory, install the sibling ShopMate checkout's locked dependencies and run the checks:
 
 ```sh
 uv sync --frozen --directory ../shopmate
 make check
 ```
 
-`make check` 覆盖核心边界、适配器和真实 ShopMate 工厂接入测试；[CI 配置](.github/workflows/check.yml) 固定其使用的 ShopMate 提交。
+`make check` covers the core boundary, adapters, and integration with the real ShopMate factory. [CI](.github/workflows/check.yml) pins the ShopMate commit used for these checks.
 
-真实模型试验要求三个仓库均已提交且源码干净。先运行本人退款正控，输出目录必须尚不存在：
+Real-model experiments require all three repositories to be committed and source-clean. Start with the own-order positive controls, using an output directory that does not yet exist:
 
 ```sh
 mkdir -p .run
@@ -69,7 +71,7 @@ mkdir -p .run
   --output "$(pwd -P)/.run/shopmate-controls"
 ```
 
-需要比较外单输入时，再运行小规模校准：
+To compare foreign-order inputs, run a small calibration:
 
 ```sh
 ./scripts/run_shopmate_ownership_ablation.sh \
@@ -77,15 +79,15 @@ mkdir -p .run
   --stage pilot --trials 3
 ```
 
-`pilot` 自行先跑两次正控，再跑三对外单试验；`--trials` 是配对数。每次运行换一个新输出目录；重现已发布结果时，使用对应报告记录的三个完整提交与模型配置。
+The pilot runs two controls before three foreign-order pairs; `--trials` counts pairs. Use a new output directory for each run. To reproduce a published experiment, use the three full commits and model configuration recorded in its report.
 
-脚本启动独立 MySQL、Auth 和两组 Commerce 服务，每个 trial 使用独立身份、会话与 ShopMate SQLite 状态。正常零售数据库不参与重置。成功且状态明确时清理自建环境；异常或写入未确认时保留隔离现场和诊断位置。
+The launcher starts isolated MySQL, Auth, and two Commerce instances. Each trial receives its own identity, session, and ShopMate SQLite state; the normal retail database is not reset. Successful runs with a confirmed state clean up their environment. Errors or uncertain writes retain the isolated fixture and diagnostics for inspection.
 
-输出保留 SQL 前后快照、SSE、确认回执及结果摘要，并记录源码 SHA 与实际模型别名。运行入口和保留规则见[当前校准报告](results/shopmate-ownership-final-20260907/README.md#runtime-and-reproduction-boundary)。
+Outputs retain SQL before/after snapshots, SSE, confirmation receipts, and result summaries, with source SHAs and the actual model alias. See the [current calibration report](results/shopmate-ownership-final-20260907/README.md#runtime-and-reproduction-boundary) for reproduction and retention details.
 
-## 继续阅读
+## Further reading
 
-- [完整实验记录](docs/EXPERIMENTS.md)：旧客服的任务表述、控制变量、校准排除、区间及模型边界。
-- [当前 ShopMate 校准](results/shopmate-ownership-final-20260907/README.md)：本人确认回放、外单未触达退款准备的完整解释。
-- [历史正式摘要](results/ownership-campaign-v1/formal/summary.json)：600 次正式试验的分母、SQL 结果和诊断统计。
-- [核心类型](src/stateeval/core/__init__.py) · [当前买家适配器](src/stateeval/shopmate.py) · [独立业务判定](src/stateeval/citybuddy.py)。
+- [Full experiment record](docs/EXPERIMENTS.md): historical task phrasings, controlled variables, excluded calibrations, intervals, and model boundaries.
+- [Current ShopMate calibration](results/shopmate-ownership-final-20260907/README.md): own-order confirmation replay and why foreign-order trials stopped before refund preparation.
+- [Historical formal summary](results/ownership-campaign-v1/formal/summary.json): denominators, SQL results, and diagnostics for 600 formal trials.
+- [Core types](src/stateeval/core/__init__.py) · [Current buyer adapter](src/stateeval/shopmate.py) · [Independent business grading](src/stateeval/citybuddy.py).
